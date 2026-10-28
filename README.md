@@ -19,13 +19,32 @@ Per-app time only counts while you have given keyboard or mouse input within the
 
 ## Usage
 
-Requires Windows and Python 3.
+Requires Windows and Python 3 (nothing to install).
+
+### App
+
+Double-click `screentime_app.pyw`, or run `pythonw screentime_app.pyw`. It runs in the background and shows today's PC-on time (`On 5h 40m`) in the bottom-left corner of the taskbar; the tray icon's tooltip also shows the work (active) time. The clock hides while a fullscreen app is open or the taskbar is auto-hidden.
+
+It also adds an icon to the hidden icons menu (the ^ arrow next to the system clock). Hover over it to see today's times. To keep it always visible, drag it from that menu onto the taskbar.
+
+- **Click** the clock or the tray icon to open the window: live totals, a **Today** tab with time per app (active/focus/cursor, optionally split by monitor) and a **History** tab with one row per day.
+- **Right-click** either one and choose **Quit tracking** to stop. Closing the window only hides it.
+
+Tick **Start with Windows** in the window to launch it at login with only the taskbar clock showing.
+
+Only one tracker can run at a time; starting a second copy (app or script) shows a message instead.
+
+### Script
 
 ```bash
 python screentime_tracker.py
 ```
 
-Press Ctrl+C to stop. A report is printed and totals are saved to `logs/<date>.json` (e.g. `logs/2026-10-28.json`), one file per day. Runs on the same day add to that day's file, and a session that runs past midnight starts a new file.
+Press Ctrl+C to stop.
+
+`python show_screentime.py` (or `python show_screentime.py 7` for the last week) prints the overall time per day from the logs.
+
+ A report is printed and totals are saved to `logs/<date>.json` (e.g. `logs/2026-10-28.json`), one file per day. Runs on the same day add to that day's file, and a session that runs past midnight starts a new file.
 
 ## Limitations
 

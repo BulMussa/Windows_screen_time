@@ -1,0 +1,17 @@
+# Version resource for ScreenTime.exe; Task Manager shows FileDescription as the app name.
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=(1, 0, 0, 0), prodvers=(1, 0, 0, 0)),
+  kids=[
+    StringFileInfo([
+      StringTable('040904B0', [
+        StringStruct('FileDescription', 'Screen Time'),
+        StringStruct('ProductName', 'Screen Time'),
+        StringStruct('FileVersion', '1.0.0'),
+        StringStruct('ProductVersion', '1.0.0'),
+        StringStruct('OriginalFilename', 'ScreenTime.exe'),
+        StringStruct('InternalName', 'ScreenTime'),
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [0x0409, 1200])])
+  ]
+)

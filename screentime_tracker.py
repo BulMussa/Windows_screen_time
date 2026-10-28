@@ -14,6 +14,8 @@ Stop:    Ctrl+C  (prints a report and saves logs/<date>.json next to the script)
 import ctypes
 import json
 import os
+import sys
+import threading
 import time
 from collections import defaultdict
 from ctypes import wintypes
@@ -24,7 +26,9 @@ TICK = 1.0
 SAVE_EVERY = 60  # seconds between saves, so a shutdown loses at most this much
 MAX_GAP = 5  # a longer pause between ticks means the PC was asleep
 KINDS = ("active", "focus", "cursor")
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+# Next to the script, or next to ScreenTime.exe when built with PyInstaller.
+APP_DIR = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+LOG_DIR = os.path.join(APP_DIR, "logs")
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -41,6 +45,8 @@ user32.MonitorFromWindow.restype = wintypes.HANDLE
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 kernel32.GetTickCount64.restype = ctypes.c_ulonglong
 kernel32.QueryUnbiasedInterruptTime.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.CreateMutexW.restype = wintypes.HANDLE
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.QueryFullProcessImageNameW.argtypes = [
     wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
@@ -48,6 +54,8 @@ kernel32.QueryFullProcessImageNameW.argtypes = [
 GA_ROOT = 2
 MONITOR_DEFAULTTONEAREST = 2
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_ALREADY_EXISTS = 183
+_mutex = None
 
 
 class MONITORINFOEXW(ctypes.Structure):
@@ -163,62 +171,95 @@ def load(day):
 def save(day, log):
     log["last_seen"] = datetime.now().isoformat(timespec="seconds")
     os.makedirs(LOG_DIR, exist_ok=True)
-    with open(log_path(day), "w") as f:
+    # Write to a temp file and swap it in, so a crash mid-write can't corrupt the log.
+    path = log_path(day)
+    with open(path + ".tmp", "w") as f:
         json.dump(log, f, indent=2)
+    os.replace(path + ".tmp", path)
 
 
-def main():
-    now = datetime.now()
-    day = now.date()
-    log = load(day)
+def already_running():
+    """True if another copy of the tracker (script or app) is already running."""
+    global _mutex
+    _mutex = kernel32.CreateMutexW(None, False, "Local\\ScreenTimeTracker")  # held until exit
+    return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
 
-    # Count the time the PC was already on today before the script started:
-    # from boot, midnight or the last save of an earlier run, whichever is latest.
-    # After a sleep the uptime can't tell when the PC was on, so start counting now.
-    boot = boot_time()
-    since = now
-    if boot:
-        since = max(boot, datetime.combine(day, datetime.min.time()))
-        if log["last_seen"]:
-            since = max(since, datetime.fromisoformat(log["last_seen"]))
-    log["total_seconds"] += max(0.0, (now - since).total_seconds())
-    log["first_seen"] = log["first_seen"] or since.isoformat(timespec="seconds")
 
-    print(f"Tracking... idle limit {IDLE_LIMIT}s. Ctrl+C to stop and show the report.")
-    last = last_save = now
-    try:
-        while True:
-            time.sleep(TICK)
+class Tracker:
+    """Counts screen time into today's log. Call tick() about every TICK seconds."""
+
+    def __init__(self):
+        now = datetime.now()
+        self.day = now.date()
+        self.log = load(self.day)
+        self.lock = threading.Lock()
+
+        # Count the time the PC was already on today before the script started:
+        # from boot, midnight or the last save of an earlier run, whichever is latest.
+        # After a sleep the uptime can't tell when the PC was on, so start counting now.
+        boot = boot_time()
+        since = now
+        if boot:
+            since = max(boot, datetime.combine(self.day, datetime.min.time()))
+            if self.log["last_seen"]:
+                since = max(since, datetime.fromisoformat(self.log["last_seen"]))
+        self.log["total_seconds"] += max(0.0, (now - since).total_seconds())
+        self.log["first_seen"] = self.log["first_seen"] or since.isoformat(timespec="seconds")
+        self.last = self.last_save = now
+
+    def tick(self):
+        with self.lock:
             now = datetime.now()
-            if now.date() != day:  # past midnight: close out yesterday's log, restart counters
-                save(day, log)
-                day = now.date()
-                log = load(day)
-                log["first_seen"] = log["first_seen"] or now.isoformat(timespec="seconds")
-            gap = (now - last).total_seconds()
-            last = now
+            if now.date() != self.day:  # past midnight: close out yesterday's log, restart counters
+                save(self.day, self.log)
+                self.day = now.date()
+                self.log = load(self.day)
+                self.log["first_seen"] = self.log["first_seen"] or now.isoformat(timespec="seconds")
+            gap = (now - self.last).total_seconds()
+            self.last = now
             if 0 < gap <= MAX_GAP:
-                log["total_seconds"] += gap
-            if (now - last_save).total_seconds() >= SAVE_EVERY:
-                save(day, log)
-                last_save = now
+                self.log["total_seconds"] += gap
+            if (now - self.last_save).total_seconds() >= SAVE_EVERY:
+                save(self.day, self.log)
+                self.last_save = now
             if idle_seconds() > IDLE_LIMIT:
-                continue
-            log["active_seconds"] += TICK
+                return
+            self.log["active_seconds"] += TICK
             focus, cursor = sample()
             seen = set()
             for kind, item in (("focus", focus), ("cursor", cursor)):
                 if item and item[0]:
                     key = f"{item[0]}|{item[1]}"
-                    log[kind][key] += TICK
+                    self.log[kind][key] += TICK
                     seen.add(key)
             for key in seen:
-                log["active"][key] += TICK
+                self.log["active"][key] += TICK
+
+    def save(self):
+        with self.lock:
+            save(self.day, self.log)
+
+    def snapshot(self):
+        """A copy of today's log that is safe to read from another thread."""
+        with self.lock:
+            return {k: dict(v) if k in KINDS else v for k, v in self.log.items()}
+
+
+def main():
+    if already_running():
+        print("The tracker is already running (as the script or the app).")
+        return
+    tracker = Tracker()
+    print(f"Tracking... idle limit {IDLE_LIMIT}s. Ctrl+C to stop and show the report.")
+    try:
+        while True:
+            time.sleep(TICK)
+            tracker.tick()
     except KeyboardInterrupt:
         pass
     finally:
-        save(day, log)
-        report(log)
+        tracker.save()
+        report(tracker.log)
 
 
 if __name__ == "__main__":
