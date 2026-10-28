@@ -1,4 +1,5 @@
 # Tracker output (personal usage data)
+logs/
 screentime_log.json
 
 # Python

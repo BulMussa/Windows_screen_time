@@ -8,7 +8,14 @@ Unlike trackers that only count the focused window, it samples once per second a
 - **cursor**: the app under the mouse cursor and the monitor the cursor is on
 - **active**: both combined (an app counts once per second even if focus and cursor match)
 
-Time only counts while you have given keyboard or mouse input within the last 60 seconds (`IDLE_LIMIT` in the script).
+Each day's log also has two overall counters:
+
+- **total_seconds**: how long the PC was on today, including idle time. When the script starts it also counts the time since boot (or midnight, or the end of an earlier run that day). If the PC has slept since booting, it counts from the script's start instead, so for the most accurate total, start the script at login.
+- **active_seconds**: how long you were actively using the PC (sleep and idle time excluded).
+
+Both reset at midnight: that day's log is saved to `logs/` and a new one starts. The log is also saved every minute, so a shutdown loses at most a minute.
+
+Per-app time only counts while you have given keyboard or mouse input within the last 60 seconds (`IDLE_LIMIT` in the script).
 
 ## Usage
 
@@ -18,7 +25,7 @@ Requires Windows and Python 3.
 python screentime_tracker.py
 ```
 
-Press Ctrl+C to stop. A report is printed and totals are saved to `screentime_log.json` (accumulated across runs).
+Press Ctrl+C to stop. A report is printed and totals are saved to `logs/<date>.json` (e.g. `logs/2026-10-28.json`), one file per day. Runs on the same day add to that day's file, and a session that runs past midnight starts a new file.
 
 ## Limitations
 
