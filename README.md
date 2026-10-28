@@ -29,6 +29,7 @@ It also adds an icon to the hidden icons menu (the ^ arrow next to the system cl
 
 - **Click** the clock or the tray icon to open the window: live totals, a **Today** tab with time per app (active/focus/cursor, optionally split by monitor) and a **History** tab with one row per day.
 - **Right-click** either one and choose **Quit tracking** to stop. Closing the window only hides it.
+- From a terminal or script, `ScreenTime.exe --quit` (or `python -m screentime --quit`) makes the running copy save and exit, e.g. before rebuilding. Unlike **Quit tracking**, it counts as a restart: the time until the next start can still count as PC-on time.
 
 Tick **Start with Windows** in the window to launch it at login with only the taskbar clock showing.
 
@@ -40,6 +41,7 @@ Only one tracker can run at a time; starting a second copy (app or console track
 python -m screentime.tracker      # track in the console; Ctrl+C stops and prints a report
 python -m screentime.report       # overall time per day from the logs
 python -m screentime.report 7     # ... for the last 7 days
+python -m screentime.tracker --quit   # save and exit the running tracker or app
 ```
 
 `pip install -e .` also installs these as the commands `screentime`, `screentime-tracker` and `screentime-report`.

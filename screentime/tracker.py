@@ -9,11 +9,14 @@ Each day's log also holds the overall time the PC was on (total_seconds, counted
 boot, midnight or the script's start) and the time you were active (active_seconds).
 
 Run:     python -m screentime.tracker
+         python -m screentime.tracker --quit   (asks the running tracker or app to save and exit)
 Stop:    Ctrl+C  (prints a report and saves <date>.json in %LOCALAPPDATA%\\ScreenTime\\logs)
 """
 import ctypes
 import json
+import _thread
 import os
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -51,6 +54,15 @@ kernel32.GetTickCount64.restype = ctypes.c_ulonglong
 kernel32.QueryUnbiasedInterruptTime.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
 kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
 kernel32.CreateMutexW.restype = wintypes.HANDLE
+kernel32.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.OpenMutexW.restype = wintypes.HANDLE
+kernel32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.CreateEventW.restype = wintypes.HANDLE
+kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.OpenEventW.restype = wintypes.HANDLE
+kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.QueryFullProcessImageNameW.argtypes = [
     wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
@@ -61,6 +73,9 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 UOI_NAME = 2
 DESKTOP_READOBJECTS = 0x0001
 ERROR_ALREADY_EXISTS = 183
+SYNCHRONIZE, EVENT_MODIFY_STATE, INFINITE = 0x00100000, 0x0002, 0xFFFFFFFF
+MUTEX_NAME = "Local\\ScreenTimeTracker"  # held by the running tracker, so only one runs
+QUIT_EVENT = "Local\\ScreenTimeTrackerQuit"  # set by --quit to ask it to save and exit
 _mutex = None
 
 
@@ -201,8 +216,46 @@ def save(day, log):
 def already_running():
     """True if another copy of the tracker (script or app) is already running."""
     global _mutex
-    _mutex = kernel32.CreateMutexW(None, False, "Local\\ScreenTimeTracker")  # held until exit
+    _mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)  # held until exit
     return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+
+
+def on_quit_request(callback):
+    """Call callback (on a background thread) when another process runs --quit."""
+    event = kernel32.CreateEventW(None, False, False, QUIT_EVENT)  # auto-reset
+
+    def wait():
+        kernel32.WaitForSingleObject(event, INFINITE)
+        callback()
+    threading.Thread(target=wait, daemon=True).start()
+
+
+def request_quit(timeout=10.0):
+    """Ask the running tracker or app to save and exit, and wait until it has.
+
+    Returns None if none is running, True once it exited, False if it didn't in time.
+    """
+    event = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, QUIT_EVENT)
+    if not event:
+        return None
+    kernel32.SetEvent(event)
+    kernel32.CloseHandle(event)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        mutex = kernel32.OpenMutexW(SYNCHRONIZE, False, MUTEX_NAME)
+        if not mutex:  # its process is gone
+            return True
+        kernel32.CloseHandle(mutex)
+        time.sleep(0.2)
+    return False
+
+
+def quit_command():
+    """Handle --quit for the entry points; returns the process exit code."""
+    result = request_quit()
+    print({None: "The tracker isn't running.", True: "The tracker saved and quit.",
+           False: "The tracker didn't quit within 10 seconds."}[result])
+    return {None: 1, True: 0, False: 2}[result]
 
 
 class Tracker:
@@ -272,10 +325,14 @@ class Tracker:
 
 
 def main():
+    if "--quit" in sys.argv:
+        sys.exit(quit_command())
     if already_running():
         print("The tracker is already running (as the script or the app).")
         return
     tracker = Tracker()
+    remote_quit = threading.Event()
+    on_quit_request(lambda: (remote_quit.set(), _thread.interrupt_main()))
     print(f"Tracking... idle limit {IDLE_LIMIT}s. Ctrl+C to stop and show the report.")
     stopped = False
     try:
@@ -283,7 +340,8 @@ def main():
             time.sleep(TICK)
             tracker.tick()
     except KeyboardInterrupt:
-        stopped = True
+        # Ctrl+C is a deliberate stop; --quit is a restart, so its gap may still count.
+        stopped = not remote_quit.is_set()
     finally:
         tracker.save(stopped)
         report(tracker.log)

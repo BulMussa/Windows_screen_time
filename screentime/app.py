@@ -6,6 +6,7 @@ hidden icons menu. Click either to open the window with today's apps and the dai
 right-click either to quit. Closing the window only hides it, tracking goes on.
 
 Run:     pythonw -m screentime     (or ScreenTime.exe, built by packaging/build.bat)
+Quit:    ScreenTime.exe --quit     (or python -m screentime --quit): saves and exits the running copy
 """
 import ctypes
 import os
@@ -20,7 +21,7 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 
 from .tracker import (KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
-                                Tracker, already_running, fmt, user32)
+                      Tracker, already_running, fmt, on_quit_request, quit_command, user32)
 from .report import read_logs, summarize
 from .tray import TrayIcon
 
@@ -340,14 +341,17 @@ class App:
         os.makedirs(LOG_DIR, exist_ok=True)
         subprocess.Popen(["explorer", LOG_DIR])
 
-    def quit(self):
+    def quit(self, stopped=True):
+        """stopped=False (from --quit) saves without the deliberate-quit mark, like a restart."""
         self.stop.set()
-        self.tracker.save(stopped=True)
+        self.tracker.save(stopped=stopped)
         self.tray.remove()
         self.root.destroy()
 
 
 def main():
+    if "--quit" in sys.argv:
+        sys.exit(quit_command())
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
     except (AttributeError, OSError):
@@ -360,7 +364,8 @@ def main():
     root = tk.Tk()
     if "--minimized" in sys.argv:
         root.withdraw()  # started with Windows: only the taskbar clock shows
-    App(root, Tracker())
+    app = App(root, Tracker())
+    on_quit_request(lambda: app.calls.put(lambda: app.quit(stopped=False)))
     root.mainloop()
 
 
