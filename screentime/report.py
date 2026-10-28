@@ -1,14 +1,14 @@
-"""Show the overall screen time per day from the logs saved by screentime_tracker.py.
+"""Show the overall screen time per day from the saved logs.
 
-Run:     python show_screentime.py        (all days)
-         python show_screentime.py 7      (last 7 days)
+Run:     python -m screentime.report        (all days)
+         python -m screentime.report 7      (last 7 days)
 """
 import glob
 import json
 import os
 import sys
 
-from screentime_tracker import LOG_DIR, fmt
+from .tracker import LOG_DIR, fmt
 
 
 def read_logs(last=None):

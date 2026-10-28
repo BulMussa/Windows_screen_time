@@ -8,13 +8,12 @@ Every second it records, if you were active in the last IDLE_LIMIT seconds:
 Each day's log also holds the overall time the PC was on (total_seconds, counted from
 boot, midnight or the script's start) and the time you were active (active_seconds).
 
-Run:     python screentime_tracker.py
-Stop:    Ctrl+C  (prints a report and saves logs/<date>.json next to the script)
+Run:     python -m screentime.tracker
+Stop:    Ctrl+C  (prints a report and saves <date>.json in %LOCALAPPDATA%\\ScreenTime\\logs)
 """
 import ctypes
 import json
 import os
-import sys
 import threading
 import time
 from collections import defaultdict
@@ -26,9 +25,9 @@ TICK = 1.0
 SAVE_EVERY = 60  # seconds between saves, so a shutdown loses at most this much
 MAX_GAP = 5  # a longer pause between ticks means the PC was asleep
 KINDS = ("active", "focus", "cursor")
-# Next to the script, or next to ScreenTime.exe when built with PyInstaller.
-APP_DIR = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
-LOG_DIR = os.path.join(APP_DIR, "logs")
+# Logs live in the user's app data, wherever the script or ScreenTime.exe is.
+LOG_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local"),
+                       "ScreenTime", "logs")
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -151,7 +150,8 @@ def log_path(day):
 
 
 def load(day):
-    log = {"total_seconds": 0.0, "active_seconds": 0.0, "first_seen": None, "last_seen": None}
+    log = {"total_seconds": 0.0, "active_seconds": 0.0, "first_seen": None, "last_seen": None,
+           "stopped": False}  # stopped: the last run ended with a deliberate quit
     log.update({k: defaultdict(float) for k in KINDS})
     path = log_path(day)
     if os.path.exists(path):
@@ -196,15 +196,17 @@ class Tracker:
 
         # Count the time the PC was already on today before the script started:
         # from boot, midnight or the last save of an earlier run, whichever is latest.
-        # After a sleep the uptime can't tell when the PC was on, so start counting now.
+        # Not after a deliberate quit (that time wasn't tracked on purpose), and not after
+        # a sleep (the uptime then can't tell when the PC was on): start counting now.
         boot = boot_time()
         since = now
-        if boot:
+        if boot and not self.log["stopped"]:
             since = max(boot, datetime.combine(self.day, datetime.min.time()))
             if self.log["last_seen"]:
                 since = max(since, datetime.fromisoformat(self.log["last_seen"]))
         self.log["total_seconds"] += max(0.0, (now - since).total_seconds())
         self.log["first_seen"] = self.log["first_seen"] or since.isoformat(timespec="seconds")
+        self.log["stopped"] = False
         self.last = self.last_save = now
 
     def tick(self):
@@ -235,8 +237,11 @@ class Tracker:
             for key in seen:
                 self.log["active"][key] += TICK
 
-    def save(self):
+    def save(self, stopped=False):
+        """Save today's log; stopped=True marks a deliberate quit, so the gap until the
+        next start isn't counted as PC-on time."""
         with self.lock:
+            self.log["stopped"] = stopped
             save(self.day, self.log)
 
     def snapshot(self):
@@ -251,14 +256,15 @@ def main():
         return
     tracker = Tracker()
     print(f"Tracking... idle limit {IDLE_LIMIT}s. Ctrl+C to stop and show the report.")
+    stopped = False
     try:
         while True:
             time.sleep(TICK)
             tracker.tick()
     except KeyboardInterrupt:
-        pass
+        stopped = True
     finally:
-        tracker.save()
+        tracker.save(stopped)
         report(tracker.log)
 
 

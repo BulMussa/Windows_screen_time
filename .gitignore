@@ -1,4 +1,4 @@
-# Tracker output (personal usage data)
+# Tracker output from older versions (logs now live in %LOCALAPPDATA%\ScreenTime\logs)
 logs/
 screentime_log.json
 
@@ -10,6 +10,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 build/
+# ScreenTime.exe from packaging/build.bat lands in dist/
 dist/
 
 # Virtual environments
@@ -36,6 +37,3 @@ desktop.ini
 
 # Claude Code local settings
 .claude/settings.local.json
-
-# Built app (run build.bat)
-ScreenTime.exe

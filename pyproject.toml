@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screentime"
+version = "1.0.0"
+description = "Multi-monitor screen time tracker for Windows, with a taskbar clock and tray icon"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+classifiers = ["Operating System :: Microsoft :: Windows"]
+
+[project.optional-dependencies]
+build = ["pyinstaller"]
+
+[project.scripts]
+screentime-tracker = "screentime.tracker:main"
+screentime-report = "screentime.report:main"
+
+[project.gui-scripts]
+screentime = "screentime.app:main"
+
+[tool.setuptools]
+packages = ["screentime"]
+
+[tool.setuptools.package-data]
+screentime = ["assets/*.ico"]

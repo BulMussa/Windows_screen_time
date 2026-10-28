@@ -1,11 +1,11 @@
 """Screen time tracker with a small window (Windows, stdlib only).
 
-Tracks in the background exactly like screentime_tracker.py and shows today's PC-on
+Tracks in the background exactly like screentime.tracker and shows today's PC-on
 time ("On 5h 40m") in the bottom-left corner of the taskbar, plus an icon in the
 hidden icons menu. Click either to open the window with today's apps and the daily history;
 right-click either to quit. Closing the window only hides it, tracking goes on.
 
-Run:     pythonw screentime_app.pyw     (or double-click the file)
+Run:     pythonw -m screentime     (or ScreenTime.exe, built by packaging/build.bat)
 """
 import ctypes
 import os
@@ -19,10 +19,10 @@ from ctypes import wintypes
 from datetime import datetime
 from tkinter import messagebox, ttk
 
-from screentime_tracker import (KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
+from .tracker import (KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
                                 Tracker, already_running, fmt, user32)
-from show_screentime import read_logs, summarize
-from tray_icon import TrayIcon
+from .report import read_logs, summarize
+from .tray import TrayIcon
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "ScreenTimeTracker"
@@ -31,9 +31,8 @@ TABLE_REFRESH = 5  # seconds between refreshes of the app tables
 HISTORY_REFRESH = 60
 CLOCK_OFFSET = 12  # pixels from the left end of the taskbar
 RAISE_EVERY = 500  # ms; the taskbar covers the clock when clicked, so keep raising it
-# PyInstaller unpacks bundled files into sys._MEIPASS.
-ICON = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))),
-                    "assets", "screentime.ico")
+ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "screentime.ico")
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
@@ -52,7 +51,9 @@ def autostart_command():
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.exists(pythonw):
         pythonw = sys.executable
-    return f'"{pythonw}" "{os.path.abspath(__file__)}" --minimized'
+    # Login starts it with no working directory, so put the project on the path itself.
+    run = f"import sys; sys.path.insert(0, r'{PROJECT_DIR}'); from screentime.app import main; main()"
+    return f'"{pythonw}" -c "{run}" --minimized'
 
 
 def autostart_enabled():
@@ -341,7 +342,7 @@ class App:
 
     def quit(self):
         self.stop.set()
-        self.tracker.save()
+        self.tracker.save(stopped=True)
         self.tray.remove()
         self.root.destroy()
 
