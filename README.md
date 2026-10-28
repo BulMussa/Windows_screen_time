@@ -10,12 +10,12 @@ Unlike trackers that only count the focused window, it samples once per second a
 
 Each day's log also has two overall counters:
 
-- **total_seconds**: how long the PC was on today, including idle time. When the app starts it also counts the time the PC was already on: since boot, midnight, or the last save of an earlier run that day that crashed or was closed from Task Manager. It skips that after **Quit tracking** (or Ctrl+C), since you stopped tracking on purpose, and after the PC has slept, since the uptime can't tell when it was on. For the most accurate total, start the app at login.
-- **active_seconds**: how long you were actively using the PC (sleep and idle time excluded).
+- **total_seconds**: how long the PC was on today, including idle time but not time on the lock screen (Win+L). When the app starts it also counts the time the PC was already on: since boot, midnight, or the last save of an earlier run that day that crashed or was closed from Task Manager. It skips that after **Quit tracking** (or Ctrl+C), since you stopped tracking on purpose, and after the PC has slept, since the uptime can't tell when it was on. For the most accurate total, start the app at login.
+- **active_seconds**: how long you were actively using the PC (sleep, idle and lock screen time excluded).
 
 Both reset at midnight: that day's log is saved and a new one starts. The log is also saved every minute, so a shutdown loses at most a minute.
 
-Per-app time only counts while you have given keyboard or mouse input within the last 60 seconds (`IDLE_LIMIT` in `screentime/tracker.py`).
+Active and per-app time only count while you have given keyboard or mouse input within the last 60 seconds (`IDLE_LIMIT` in `screentime/tracker.py`). Locking the screen stops all counting right away.
 
 ## Usage
 

@@ -42,6 +42,11 @@ user32.MonitorFromPoint.restype = wintypes.HANDLE
 user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
 user32.MonitorFromWindow.restype = wintypes.HANDLE
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+user32.OpenInputDesktop.restype = wintypes.HANDLE
+user32.GetUserObjectInformationW.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID,
+                                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+user32.CloseDesktop.argtypes = [wintypes.HANDLE]
 kernel32.GetTickCount64.restype = ctypes.c_ulonglong
 kernel32.QueryUnbiasedInterruptTime.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
 kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
@@ -53,6 +58,8 @@ kernel32.QueryFullProcessImageNameW.argtypes = [
 GA_ROOT = 2
 MONITOR_DEFAULTTONEAREST = 2
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+UOI_NAME = 2
+DESKTOP_READOBJECTS = 0x0001
 ERROR_ALREADY_EXISTS = 183
 _mutex = None
 
@@ -71,6 +78,19 @@ def idle_seconds():
     info = LASTINPUTINFO(ctypes.sizeof(LASTINPUTINFO))
     user32.GetLastInputInfo(ctypes.byref(info))
     return (kernel32.GetTickCount() - info.dwTime) / 1000.0
+
+
+def screen_locked():
+    """True while the lock screen (a desktop other than the user's "Default") has the input."""
+    desk = user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS)
+    if not desk:
+        return True  # the lock screen's desktop can't be opened from the user's session
+    try:
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetUserObjectInformationW(desk, UOI_NAME, name, ctypes.sizeof(name), None)
+        return name.value.lower() != "default"
+    finally:
+        user32.CloseDesktop(desk)
 
 
 def boot_time():
@@ -219,12 +239,13 @@ class Tracker:
                 self.log["first_seen"] = self.log["first_seen"] or now.isoformat(timespec="seconds")
             gap = (now - self.last).total_seconds()
             self.last = now
-            if 0 < gap <= MAX_GAP:
+            locked = screen_locked()  # away: nothing counts, not even PC-on time
+            if 0 < gap <= MAX_GAP and not locked:
                 self.log["total_seconds"] += gap
             if (now - self.last_save).total_seconds() >= SAVE_EVERY:
                 save(self.day, self.log)
                 self.last_save = now
-            if idle_seconds() > IDLE_LIMIT:
+            if locked or idle_seconds() > IDLE_LIMIT:
                 return
             self.log["active_seconds"] += TICK
             focus, cursor = sample()
