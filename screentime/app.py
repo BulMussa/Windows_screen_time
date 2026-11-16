@@ -1,7 +1,7 @@
 """Screen time tracker with a small window (Windows, stdlib only).
 
-Tracks in the background exactly like screentime.tracker and shows today's PC-on
-time ("On 5h 40m") in the bottom-left corner of the taskbar, plus an icon in the
+Tracks in the background exactly like screentime.tracker and shows today's active
+time ("Active 3h 12m") in the bottom-left corner of the taskbar, plus an icon in the
 hidden icons menu. Click either to open the window with today's apps and the daily history;
 right-click either to quit. Closing the window only hides it, tracking goes on.
 
@@ -17,14 +17,14 @@ import sys
 import threading
 import tkinter as tk
 import winreg
-from ctypes import wintypes
 from datetime import datetime
+from ctypes import wintypes
 from tkinter import font as tkfont, messagebox, ttk
 
 from .tracker import (KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
-                      Tracker, already_running, fmt, on_quit_request, quit_command, user32,
+                      Tracker, already_running, on_quit_request, quit_command, uptime_seconds, user32,
                       wait_until_stopped)
-from .icons import icon_png, small_icon_size
+from .icons import icon_png, large_icon_size, small_icon_size
 from .report import read_logs, summarize
 from .tray import TrayIcon
 
@@ -35,6 +35,7 @@ TABLE_REFRESH = 5  # seconds between refreshes of the app tables
 HISTORY_REFRESH = 60
 CLOCK_OFFSET = 12  # pixels from the left end of the taskbar
 RAISE_EVERY = 500  # ms; the taskbar covers the clock when clicked, so keep raising it
+TIMELINE_TRACK, TIMELINE_ON, TIMELINE_NOW = "#e5e7eb", "#2563eb", "#dc2626"
 ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "screentime.ico")
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -132,15 +133,25 @@ def visible_taskbar():
 
 
 def short(seconds):
-    h, m = divmod(int(seconds) // 60, 60)
-    return f"{h}h {m:02d}m"
+    """Hours and minutes, e.g. 3h 05m; with days once there is at least one (for uptime)."""
+    d, rem = divmod(int(seconds) // 60, 24 * 60)
+    h, m = divmod(rem, 60)
+    return f"{d}d {h}h {m:02d}m" if d else f"{h}h {m:02d}m"
 
 
 def duration(seconds):
-    """Like fmt, but leaves out the hours until there is at least one."""
-    h, rem = divmod(int(seconds), 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
+    """Like short, but leaves out the hours until there is at least one."""
+    h, m = divmod(int(seconds) // 60, 60)
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
+
+def fit(text, font, width):
+    """text, shortened with an ellipsis to fit in width pixels."""
+    if font.measure(text) <= width:
+        return text
+    while text and font.measure(text + "…") > width:
+        text = text[:-1]
+    return text + "…"
 
 
 def colored_button(parent, text, color, hover, command):
@@ -181,7 +192,7 @@ def fill(tree, rows):
 
 
 class TaskbarClock:
-    """Today's PC-on time, and since when it counts, drawn over the left end of the taskbar."""
+    """Today's active time drawn over the left end of the taskbar."""
 
     def __init__(self, app):
         self.app = app
@@ -189,7 +200,7 @@ class TaskbarClock:
         # Pixels in this color turn see-through. It is close to the taskbar's own color
         # so the anti-aliased edges of the text blend in.
         key = "#eeeeef" if light else "#1c1c1d"
-        text, dim = ("#000000", "#555555") if light else ("#ffffff", "#aaaaaa")
+        text = "#000000" if light else "#ffffff"
 
         self.win = tk.Toplevel(app.root)
         self.win.overrideredirect(True)
@@ -197,23 +208,19 @@ class TaskbarClock:
         self.win.attributes("-transparentcolor", key)
         self.win.configure(bg=key)
         self.label = tk.Label(self.win, bg=key, fg=text, font=("Segoe UI Semibold", 11), pady=0)
-        self.since = tk.Label(self.win, bg=key, fg=dim, font=("Segoe UI", 8), pady=0)
         self.label.pack()
-        self.since.pack()
 
         self.menu = tk.Menu(self.win, tearoff=False)
         self.menu.add_command(label="Open Screen Time", command=app.show)
         self.menu.add_separator()
         self.menu.add_command(label="Quit tracking", command=app.quit)
-        for widget in (self.win, self.label, self.since):
+        for widget in (self.win, self.label):
             widget.bind("<Button-1>", lambda e: app.show())
             widget.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
         self.place()
 
     def update(self, log):
-        self.label.config(text=f"On {short(log['total_seconds'])}")
-        if log["first_seen"]:
-            self.since.config(text=f"since {datetime.fromisoformat(log['first_seen']):%H:%M}")
+        self.label.config(text=f"Active {short(log['active_seconds'])}")
 
     def place(self):
         rect = visible_taskbar()
@@ -238,8 +245,8 @@ class App:
         self.ticks = 0
 
         root.title("Screen Time")
-        root.geometry("560x560")
-        root.minsize(440, 400)
+        root.geometry("560x700")
+        root.minsize(440, 560)
         root.protocol("WM_DELETE_WINDOW", root.withdraw)  # hide; the clock and tray icon stay
         if os.path.exists(ICON):
             root.iconbitmap(default=ICON)
@@ -247,6 +254,11 @@ class App:
         style.configure("Value.TLabel", font=("Segoe UI Semibold", 22))
         style.configure("Caption.TLabel", font=("Segoe UI", 9), foreground="#666")
         style.configure("Heading.TLabel", font=("Segoe UI Semibold", 10))
+        style.configure("Rank.TLabel", font=("Segoe UI Semibold", 16), foreground="#888")
+        self.app_name_font = tkfont.Font(family="Segoe UI Semibold", size=10)
+        self.timeline_font = tkfont.Font(family="Segoe UI", size=8)
+        style.configure("AppName.TLabel", font=self.app_name_font)
+        self.scale = root.winfo_fpixels("1i") / 96  # display scaling, for canvas sizes in pixels
         # Rows tall enough for the app icons
         icon = small_icon_size()
         text = tkfont.nametofont("TkDefaultFont").metrics("linespace")
@@ -256,37 +268,51 @@ class App:
             ("Treeitem.image", {"side": "left", "sticky": ""}),
             ("Treeitem.focus", {"side": "left", "sticky": "", "children": [
                 ("Treeitem.text", {"side": "left", "sticky": ""})]})]})])
-        self.icons = {}  # .exe path -> PhotoImage, or None if it has no icon
+        self.icons = {}  # (.exe path, large) -> PhotoImage, or None if it has no icon
         self.no_icon = tk.PhotoImage(width=icon, height=icon)  # blank, keeps names aligned
+        self.no_large_icon = tk.PhotoImage(width=large_icon_size(), height=large_icon_size())
 
         # Today's totals
         top = ttk.Frame(root, padding=(16, 12, 16, 4))
         top.pack(fill="x")
-        self.pc_on = tk.StringVar()
         self.active = tk.StringVar()
-        self.since = tk.StringVar()
-        for col, (caption, var) in enumerate((("PC on today", self.pc_on), ("Active today", self.active))):
+        self.uptime = tk.StringVar()
+        for col, (caption, var) in enumerate((("Active today", self.active), ("PC up time", self.uptime))):
             ttk.Label(top, text=caption, style="Caption.TLabel").grid(row=0, column=col, sticky="w")
             ttk.Label(top, textvariable=var, style="Value.TLabel").grid(row=1, column=col, sticky="w", padx=(0, 32))
-        ttk.Label(top, textvariable=self.since, style="Caption.TLabel").grid(row=2, column=0, columnspan=2, sticky="w")
 
-        tabs = ttk.Notebook(root)
+        tabs = self.tabs = ttk.Notebook(root)
         tabs.pack(fill="both", expand=True, padx=16, pady=8)
 
-        # Today tab: per-app time
-        today = ttk.Frame(tabs, padding=8)
-        tabs.add(today, text="Today")
-        bar = ttk.Frame(today)
+        # Report tab: when the PC was on today, the top 3 apps, and every app's time
+        report = ttk.Frame(tabs, padding=12)
+        tabs.add(report, text="Report")
+        ttk.Label(report, text="PC on today", style="Heading.TLabel").pack(anchor="w")
+        self.timeline = tk.Canvas(report, height=int(58 * self.scale), highlightthickness=0,
+                                  bg=style.lookup("TFrame", "background") or root.cget("bg"))
+        self.timeline.pack(fill="x", pady=(6, 0))
+        self.timeline.bind("<Configure>", lambda e: self.refresh_report())
+        ttk.Separator(report).pack(fill="x", pady=10)
+        ttk.Label(report, text="Most used apps", style="Heading.TLabel").pack(anchor="w")
+        self.top_apps = ttk.Frame(report)
+        self.top_apps.pack(fill="x", pady=(10, 0))
+        self.top_apps.bind("<Configure>", lambda e: self.refresh_report())
+        for col in range(3):
+            self.top_apps.columnconfigure(col, weight=1, uniform="top")
+        self.top_shown = None  # what the top apps row shows, to rebuild it only on changes
+        ttk.Separator(report).pack(fill="x", pady=10)
+        bar = ttk.Frame(report)
         bar.pack(fill="x", pady=(0, 6))
         ttk.Label(bar, text="Count by:").pack(side="left")
         self.kind = tk.StringVar(value="active")
         kind = ttk.Combobox(bar, textvariable=self.kind, values=KINDS, state="readonly", width=8)
         kind.pack(side="left", padx=6)
-        kind.bind("<<ComboboxSelected>>", lambda e: self.refresh_apps())
+        kind.bind("<<ComboboxSelected>>", lambda e: self.refresh_report())
         self.by_monitor = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="Split by monitor", variable=self.by_monitor,
                         command=self.refresh_apps).pack(side="left", padx=12)
-        frame, self.apps = make_table(today, [("Time", 110, "e"), ("Share", 70, "e")], tree_column=("App", 260))
+        frame, self.apps = make_table(report, [("Time", 110, "e"), ("Share", 70, "e")], tree_column=("App", 260))
+        self.apps.configure(height=4)  # asks for little; grows into whatever height is left
         frame.pack(fill="both", expand=True)
 
         # History tab: one row per day
@@ -297,7 +323,8 @@ class App:
         frame.pack(fill="both", expand=True)
         self.summary = tk.StringVar()
         ttk.Label(history, textvariable=self.summary, style="Caption.TLabel").pack(anchor="w", pady=(6, 0))
-        tabs.bind("<<NotebookTabChanged>>", lambda e: self.refresh_history())
+        # Fresh data the moment a tab is picked; after_idle, so it is laid out to draw into
+        tabs.bind("<<NotebookTabChanged>>", lambda e: root.after_idle(self.refresh_tab))
 
         # Settings tab
         settings = ttk.Frame(tabs, padding=12)
@@ -325,7 +352,7 @@ class App:
 
         # Footer
         foot = ttk.Frame(root, padding=(16, 0, 16, 12))
-        foot.pack(fill="x")
+        foot.pack(fill="x", side="bottom", before=tabs)  # space kept first, so the tabs can't squeeze it out
         colored_button(foot, "Done", "#16a34a", "#15803d", root.withdraw).pack(side="right")
         colored_button(foot, "Quit tracking", "#dc2626", "#b91c1c", self.quit).pack(side="right", padx=(0, 8))
 
@@ -351,16 +378,21 @@ class App:
         self.tray.set_tooltip(f"Screen Time\nWork {short(log['active_seconds'])}\n"
                               f"PC on {short(log['total_seconds'])}")
         if self.root.state() == "normal":  # skip the window's work while it is hidden
-            self.pc_on.set(fmt(log["total_seconds"]))
-            self.active.set(fmt(log["active_seconds"]))
-            since = datetime.fromisoformat(log["first_seen"]).strftime("%H:%M") if log["first_seen"] else "now"
-            self.since.set(f"Counting since {since} · closing this window keeps tracking in the background")
+            self.active.set(short(log["active_seconds"]))
+            self.uptime.set(short(uptime_seconds()))  # since Windows started; restarts reset it
             if self.ticks % TABLE_REFRESH == 0:
-                self.refresh_apps(log)
-            if self.ticks % HISTORY_REFRESH == 0:
-                self.refresh_history(log)
+                self.refresh_tab(log, history=self.ticks % HISTORY_REFRESH == 0)
             self.ticks += 1
         self.root.after(1000, self.refresh)
+
+    def refresh_tab(self, log=None, history=True):
+        """Refresh the tab that is showing; history=False skips History (it reads every log)."""
+        log = log or self.tracker.snapshot()
+        tab = self.tabs.tab(self.tabs.select(), "text")
+        if tab == "Report":
+            self.refresh_report(log)
+        elif tab == "History" and history:
+            self.refresh_history(log)
 
     def run_calls(self):
         while not self.calls.empty():
@@ -387,14 +419,78 @@ class App:
             self.apps.insert("", "end", text=f"  {name}", image=image,  # spaces: gap after the icon
                              values=(duration(secs), f"{secs / whole:.0%}"))
 
-    def app_icon(self, path):
-        """The app's icon for the table, read from its .exe once and then cached."""
+    def app_icon(self, path, large=False):
+        """The app's icon, read from its .exe once and then cached; a blank one if it has none."""
+        blank = self.no_large_icon if large else self.no_icon
         if not path:
-            return self.no_icon
-        if path not in self.icons:
-            png = icon_png(path)
-            self.icons[path] = tk.PhotoImage(data=base64.b64encode(png)) if png else None
-        return self.icons[path] or self.no_icon
+            return blank
+        if (path, large) not in self.icons:
+            png = icon_png(path, large)
+            self.icons[path, large] = tk.PhotoImage(data=base64.b64encode(png)) if png else None
+        return self.icons[path, large] or blank
+
+    def refresh_report(self, log=None):
+        log = log or self.tracker.snapshot()
+        self.draw_timeline(log["on_timeline"])
+        self.refresh_apps(log)
+
+        # Top 3 by the same "Count by" measure as the list below, one entry per app
+        apps = {}
+        for key, secs in log[self.kind.get()].items():
+            app = key.split("|")[0]
+            apps[app] = apps.get(app, 0.0) + secs
+        top = sorted(apps.items(), key=lambda kv: -kv[1])[:3]
+        column = self.top_apps.winfo_width() // 3
+        shown = [(app, int(secs) // 60, log["paths"].get(app)) for app, secs in top] + [column]
+        if shown == self.top_shown:
+            return
+        self.top_shown = shown
+        for widget in self.top_apps.winfo_children():
+            widget.destroy()
+        if not top:
+            ttk.Label(self.top_apps, text="No app time yet today.", style="Caption.TLabel").grid(sticky="w")
+        gap = int(8 * self.scale)
+        for col, (app, minutes, path) in enumerate(shown[:-1]):
+            cell = ttk.Frame(self.top_apps)
+            cell.grid(row=0, column=col, sticky="w")
+            rank = ttk.Label(cell, text=str(col + 1), style="Rank.TLabel")
+            rank.grid(row=0, column=0, rowspan=2, padx=(0, gap))
+            icon = ttk.Label(cell, image=self.app_icon(path, large=True))
+            icon.grid(row=0, column=1, rowspan=2, padx=(0, gap))
+            # The name gets what is left of the column after the rank, the icon and the gaps
+            room = column - rank.winfo_reqwidth() - icon.winfo_reqwidth() - 3 * gap
+            name = fit(app[:-4] if app.lower().endswith(".exe") else app, self.app_name_font, max(room, 40))
+            ttk.Label(cell, text=name, style="AppName.TLabel").grid(row=0, column=2, sticky="sw")
+            ttk.Label(cell, text=duration(minutes * 60), style="Caption.TLabel").grid(row=1, column=2, sticky="nw")
+
+    def draw_timeline(self, spans):
+        """A 00:00-23:59 bar divided by hour, colored in where the PC was on."""
+        c, s = self.timeline, self.scale
+        c.delete("all")
+        width = c.winfo_width()
+        if width < 50:  # not laid out yet
+            return
+        left, right, top, bottom = 1, width - 1, 4 * s, 26 * s
+        x = lambda sec: left + (right - left) * sec / 86400
+        c.create_rectangle(left, top, right, bottom, fill=TIMELINE_TRACK, outline="")
+        bg = c.cget("bg")
+        for h in range(1, 24):  # thin gaps divide the gray bar into hours; drawn first, so on-time covers them
+            c.create_line(x(h * 3600), top, x(h * 3600), bottom, fill=bg)
+        for start, end in spans:
+            c.create_rectangle(x(start), top, max(x(end), x(start) + 1), bottom, fill=TIMELINE_ON, outline="")
+        # A label every 3 hours, or every 6 when the bar is too narrow for them to fit side by side
+        label_width = self.timeline_font.measure("00:00")
+        step = 3 if x(3 * 3600) - x(0) >= 1.5 * label_width + 6 * s else 6
+        for h in range(25):
+            xh = x(h * 3600)
+            c.create_line(xh, bottom, xh, bottom + (6 if h % step == 0 else 3) * s, fill="#999")
+            if h % step == 0:
+                label, anchor = ("23:59", "ne") if h == 24 else (f"{h:02d}:00", "nw" if h == 0 else "n")
+                c.create_text(xh, bottom + 8 * s, text=label, anchor=anchor, fill="#666", font=self.timeline_font)
+        if self.tracker.day == datetime.now().date():
+            now = datetime.now()
+            xn = x(now.hour * 3600 + now.minute * 60 + now.second)
+            c.create_line(xn, top - 3 * s, xn, bottom + 3 * s, fill=TIMELINE_NOW, width=max(2, int(2 * s)))
 
     def refresh_history(self, log=None):
         today = log or self.tracker.snapshot()
@@ -405,11 +501,11 @@ class App:
             on, active, top = summarize(logs[day])
             on_sum += on
             active_sum += active
-            rows.append((day, fmt(on), fmt(active), top))
+            rows.append((day, short(on), short(active), top))
         fill(self.days, rows)
         n = len(rows)
-        self.summary.set(f"{n} day{'s' if n != 1 else ''} · average PC on {fmt(on_sum / n)}, "
-                         f"active {fmt(active_sum / n)}")
+        self.summary.set(f"{n} day{'s' if n != 1 else ''} · average PC on {short(on_sum / n)}, "
+                         f"active {short(active_sum / n)}")
 
     def toggle_autostart(self):
         try:

@@ -46,19 +46,23 @@ gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, winty
                             wintypes.LPVOID, ctypes.POINTER(BITMAPINFOHEADER), wintypes.UINT]
 gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
 
-SHGFI_ICON, SHGFI_SMALLICON = 0x100, 0x1
-SM_CXSMICON = 49
+SHGFI_ICON, SHGFI_SMALLICON, SHGFI_LARGEICON = 0x100, 0x1, 0x0
+SM_CXICON, SM_CXSMICON = 11, 49
 
 
 def small_icon_size():
     return user32.GetSystemMetrics(SM_CXSMICON)
 
 
-def icon_png(path):
-    """PNG bytes of the small icon of the file at path, or None if it has none."""
+def large_icon_size():
+    return user32.GetSystemMetrics(SM_CXICON)
+
+
+def icon_png(path, large=False):
+    """PNG bytes of the small (or large, usually 32 px) icon of the file at path, or None."""
     info = SHFILEINFOW()
     if not shell32.SHGetFileInfoW(path, 0, ctypes.byref(info), ctypes.sizeof(info),
-                                  SHGFI_ICON | SHGFI_SMALLICON) or not info.hIcon:
+                                  SHGFI_ICON | (SHGFI_LARGEICON if large else SHGFI_SMALLICON)) or not info.hIcon:
         return None
     try:
         return _icon_to_png(info.hIcon)

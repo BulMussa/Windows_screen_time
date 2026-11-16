@@ -108,9 +108,14 @@ def screen_locked():
         user32.CloseDesktop(desk)
 
 
+def uptime_seconds():
+    """Time since Windows started, sleep included, like Task Manager's Up time."""
+    return kernel32.GetTickCount64() / 1000.0
+
+
 def boot_time():
     """When the PC booted, or None if it has slept since (uptime then includes the sleep)."""
-    uptime = kernel32.GetTickCount64() / 1000.0
+    uptime = uptime_seconds()
     awake = ctypes.c_ulonglong()
     kernel32.QueryUnbiasedInterruptTime(ctypes.byref(awake))  # 100ns units, sleep excluded
     if uptime - awake.value / 1e7 > 60:
@@ -192,7 +197,8 @@ def log_path(day):
 def load(day):
     log = {"total_seconds": 0.0, "active_seconds": 0.0, "first_seen": None, "last_seen": None,
            "stopped": False,  # stopped: the last run ended with a deliberate quit
-           "paths": {}}  # app name -> .exe path, so the window can show app icons
+           "paths": {},  # app name -> .exe path, so the window can show app icons
+           "on_timeline": []}  # when the PC was on, as [start, end] seconds after midnight
     log.update({k: defaultdict(float) for k in KINDS})
     path = log_path(day)
     if os.path.exists(path):
@@ -289,6 +295,7 @@ class Tracker:
             if self.log["last_seen"]:
                 since = max(since, datetime.fromisoformat(self.log["last_seen"]))
         self.log["total_seconds"] += max(0.0, (now - since).total_seconds())
+        self.mark_on(since, now)
         self.log["first_seen"] = self.log["first_seen"] or since.isoformat(timespec="seconds")
         self.log["stopped"] = False
         self.last = self.last_save = now
@@ -306,6 +313,7 @@ class Tracker:
             locked = screen_locked()  # away: nothing counts, not even PC-on time
             if 0 < gap <= MAX_GAP and not locked:
                 self.log["total_seconds"] += gap
+                self.mark_on(now - timedelta(seconds=gap), now)
             if (now - self.last_save).total_seconds() >= SAVE_EVERY:
                 save(self.day, self.log)
                 self.last_save = now
@@ -331,10 +339,24 @@ class Tracker:
             self.log["stopped"] = stopped
             save(self.day, self.log)
 
+    def mark_on(self, start, end):
+        """Add start-end (today) to the PC-on timeline, extending the last stretch if it touches."""
+        midnight = datetime.combine(self.day, datetime.min.time())
+        a = max(0, round((start - midnight).total_seconds()))
+        b = round((end - midnight).total_seconds())
+        if b <= a:
+            return
+        spans = self.log["on_timeline"]
+        if spans and a - spans[-1][1] <= MAX_GAP:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+
     def snapshot(self):
         """A copy of today's log that is safe to read from another thread."""
         with self.lock:
-            return {k: dict(v) if isinstance(v, dict) else v for k, v in self.log.items()}
+            return {k: dict(v) if isinstance(v, dict) else [list(s) for s in v] if isinstance(v, list) else v
+                    for k, v in self.log.items()}
 
 
 def main():

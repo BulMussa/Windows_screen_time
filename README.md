@@ -23,11 +23,11 @@ Requires Windows 10 or 11. `dist\ScreenTime.exe` runs without Python; running fr
 
 ### App
 
-Start `ScreenTime.exe`, or run `pythonw -m screentime` from the project folder. It runs in the background and shows today's PC-on time and since when it counts (`On 5h 40m`, with `since 08:15` below) in the bottom-left corner of the taskbar; the tray icon's tooltip also shows the work (active) time. The clock hides while a fullscreen app is open or the taskbar is auto-hidden.
+Start `ScreenTime.exe`, or run `pythonw -m screentime` from the project folder. It runs in the background and shows today's active time (`Active 3h 12m`) in the bottom-left corner of the taskbar; the tray icon's tooltip also shows the PC-on time. The clock hides while a fullscreen app is open or the taskbar is auto-hidden.
 
 It also adds an icon to the hidden icons menu (the ^ arrow next to the system clock). Hover over it to see today's times. To keep it always visible, drag it from that menu onto the taskbar.
 
-- **Click** the clock or the tray icon to open the window: live totals, a **Today** tab with time per app and its icon (active/focus/cursor, optionally split by monitor), a **History** tab with one row per day, and a **Settings** tab (Start with Windows, logs folder, and **Restart Screen Time**, which saves and starts the app again without losing time).
+- **Click** the clock or the tray icon to open the window: today's active time and the PC's up time (since Windows last started, like Task Manager's Up time; restarts and shutdowns reset it), a **Report** tab with a 00:00-23:59 timeline of when the PC was on today (blue, idle time included; sleep, power-off and the lock screen left gray), the 3 most used apps, and every app's time with its icon (counted by active/focus/cursor, optionally split by monitor; the top 3 follow the same count), a **History** tab with one row per day, and a **Settings** tab (Start with Windows, logs folder, and **Restart Screen Time**, which saves and starts the app again without losing time).
 - **Right-click** either one and choose **Quit tracking** to stop, or use the red **Quit tracking** button in the window. The green **Done** button (or closing the window) only hides it; tracking goes on.
 - From a terminal or script, `ScreenTime.exe --quit` (or `python -m screentime --quit`) makes the running copy save and exit, e.g. before rebuilding. Unlike **Quit tracking**, it counts as a restart: the time until the next start can still count as PC-on time.
 
