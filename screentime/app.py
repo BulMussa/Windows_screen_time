@@ -9,6 +9,7 @@ Run:     pythonw -m screentime     (or ScreenTime.exe, built by packaging/build.
 Quit:    ScreenTime.exe --quit     (or python -m screentime --quit): saves and exits the running copy
 """
 import base64
+import calendar
 import ctypes
 import os
 import queue
@@ -17,15 +18,15 @@ import sys
 import threading
 import tkinter as tk
 import winreg
-from datetime import datetime
+from datetime import date, datetime
 from ctypes import wintypes
 from tkinter import font as tkfont, messagebox, ttk
 
-from .tracker import (KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
+from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
                       Tracker, already_running, on_quit_request, quit_command, uptime_seconds, user32,
                       wait_until_stopped)
 from .icons import icon_png, large_icon_size, small_icon_size
-from .report import read_logs, summarize
+from .report import logged_days, read_log, read_logs, summarize
 from .tray import TrayIcon
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -237,6 +238,93 @@ class TaskbarClock:
         self.win.after(RAISE_EVERY, self.place)
 
 
+class DatePicker:
+    """A month calendar that drops down under a button. Days with a log are bold, today is
+    blue, the picked day is filled blue; future days can't be picked."""
+
+    def __init__(self, app, button, selected, on_pick):
+        self.app, self.button, self.selected, self.on_pick = app, button, selected, on_pick
+        self.today = datetime.now().date()
+        self.logged = logged_days()
+        self.month = selected.replace(day=1)
+        self.win = tk.Toplevel(app.root)
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        border = tk.Frame(self.win, bg="#c8c8c8", padx=1, pady=1)
+        border.pack()
+        self.body = tk.Frame(border, bg="white", padx=8, pady=8)
+        self.body.pack()
+        self.draw()
+        self.win.geometry(f"+{button.winfo_rootx()}+{button.winfo_rooty() + button.winfo_height() + 2}")
+        self.win.bind("<Escape>", lambda e: self.close())
+        self.win.bind("<FocusOut>", lambda e: self.win.after(100, self.close_if_unfocused))
+        app.root.bind_all("<Button-1>", self.click_outside, add="+")
+        self.win.focus_force()
+
+    def draw(self):
+        for widget in self.body.winfo_children():
+            widget.destroy()
+        head = tk.Frame(self.body, bg="white")
+        head.grid(row=0, column=0, columnspan=7, sticky="ew", pady=(0, 6))
+        self.nav(head, "‹", -1, True).pack(side="left")
+        self.nav(head, "›", 1, self.month < self.today.replace(day=1)).pack(side="right")
+        tk.Label(head, text=f"{self.month:%B %Y}", bg="white",
+                 font=("Segoe UI Semibold", 10)).pack(side="left", expand=True)
+        for col, name in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
+            tk.Label(self.body, text=name, bg="white", fg="#888", font=("Segoe UI", 8)).grid(row=1, column=col)
+        weeks = calendar.Calendar().monthdatescalendar(self.month.year, self.month.month)
+        for row, week in enumerate(weeks, 2):
+            for col, day in enumerate(week):
+                if day.month == self.month.month:
+                    self.day_button(day).grid(row=row, column=col, padx=1, pady=1)
+        tk.Label(self.body, text="Bold days have data", bg="white", fg="#888",
+                 font=("Segoe UI", 8)).grid(row=8, column=0, columnspan=7, pady=(6, 0))
+
+    def nav(self, parent, text, months, enabled):
+        return tk.Button(parent, text=text, width=2, relief="flat", bd=0, bg="white", activebackground="#e5e7eb",
+                         font=("Segoe UI Semibold", 11), cursor="hand2" if enabled else "",
+                         state="normal" if enabled else "disabled", command=lambda: self.step(months))
+
+    def day_button(self, day):
+        has_data = day.isoformat() in self.logged
+        font = ("Segoe UI Semibold" if has_data else "Segoe UI", 9)
+        bg, fg = "white", "#111" if has_data else "#999"
+        if day == self.today:
+            fg = TIMELINE_ON
+        if day == self.selected:
+            bg, fg = TIMELINE_ON, "white"
+        future = day > self.today
+        return tk.Button(self.body, text=str(day.day), width=3, relief="flat", bd=0, bg=bg, fg=fg, font=font,
+                         activebackground="#e5e7eb", disabledforeground="#d4d4d4", cursor="" if future else "hand2",
+                         state="disabled" if future else "normal", command=lambda: self.pick(day))
+
+    def step(self, months):
+        year, month = divmod(self.month.month - 1 + months, 12)
+        self.month = date(self.month.year + year, month + 1, 1)
+        self.draw()
+
+    def pick(self, day):
+        self.close()
+        self.on_pick(day)
+
+    def click_outside(self, event):
+        inside = str(event.widget).startswith(str(self.win))
+        if not inside and event.widget is not self.button:  # the button toggles it itself
+            self.close()
+
+    def close_if_unfocused(self):
+        if self.app.date_picker is self:
+            focus = self.win.focus_get()
+            if focus is None or not str(focus).startswith(str(self.win)):
+                self.close()
+
+    def close(self):
+        if self.app.date_picker is self:
+            self.app.date_picker = None
+        self.app.root.unbind_all("<Button-1>")
+        self.win.destroy()
+
+
 class App:
     def __init__(self, root, tracker):
         self.root = root
@@ -253,6 +341,7 @@ class App:
         style = ttk.Style()
         style.configure("Value.TLabel", font=("Segoe UI Semibold", 22))
         style.configure("Caption.TLabel", font=("Segoe UI", 9), foreground="#666")
+        style.configure("NoData.TLabel", font=("Segoe UI", 10), foreground="#888")
         style.configure("Heading.TLabel", font=("Segoe UI Semibold", 10))
         style.configure("Rank.TLabel", font=("Segoe UI Semibold", 16), foreground="#888")
         self.app_name_font = tkfont.Font(family="Segoe UI Semibold", size=10)
@@ -287,7 +376,14 @@ class App:
         # Report tab: when the PC was on today, the top 3 apps, and every app's time
         report = ttk.Frame(tabs, padding=12)
         tabs.add(report, text="Report")
-        ttk.Label(report, text="PC on today", style="Heading.TLabel").pack(anchor="w")
+        head = ttk.Frame(report)
+        head.pack(fill="x")
+        ttk.Label(head, text="PC on", style="Heading.TLabel").pack(side="left")
+        self.report_day = None  # the day the Report shows; None follows today
+        self.past_log = None  # that day's saved log when it isn't today (None: no data)
+        self.date_picker = None
+        self.date_button = ttk.Button(head, command=self.toggle_date_picker)
+        self.date_button.pack(side="left", padx=(10, 0))
         self.timeline = tk.Canvas(report, height=int(58 * self.scale), highlightthickness=0,
                                   bg=style.lookup("TFrame", "background") or root.cget("bg"))
         self.timeline.pack(fill="x", pady=(6, 0))
@@ -314,6 +410,8 @@ class App:
         frame, self.apps = make_table(report, [("Time", 110, "e"), ("Share", 70, "e")], tree_column=("App", 260))
         self.apps.configure(height=4)  # asks for little; grows into whatever height is left
         frame.pack(fill="both", expand=True)
+        self.no_apps = tk.Label(self.apps, text="No data", fg="#888", font=("Segoe UI", 10),
+                                bg=style.lookup("Treeview", "fieldbackground") or "white")
 
         # History tab: one row per day
         history = ttk.Frame(tabs, padding=8)
@@ -405,19 +503,47 @@ class App:
         self.root.lift()
         self.root.focus_force()
 
+    def shown_day(self):
+        return self.report_day or self.tracker.day
+
+    def shown_log(self, live=None):
+        """The log the Report shows: today's live one, or the picked day's (None if it has no data)."""
+        if self.report_day is None or self.report_day == self.tracker.day:
+            return live or self.tracker.snapshot()
+        return self.past_log
+
+    def toggle_date_picker(self):
+        if self.date_picker:
+            self.date_picker.close()
+        else:
+            self.date_picker = DatePicker(self, self.date_button, self.shown_day(), self.pick_day)
+
+    def pick_day(self, day):
+        self.report_day = None if day == self.tracker.day else day
+        self.past_log = read_log(day) if self.report_day else None
+        self.refresh_report()
+
     def refresh_apps(self, log=None):
-        log = log or self.tracker.snapshot()
+        log = self.shown_log(log) or {}
         totals = {}
-        for key, secs in log[self.kind.get()].items():
+        for key, secs in log.get(self.kind.get(), {}).items():
             app, monitor = key.split("|")
             name = f"{app}  ({monitor})" if self.by_monitor.get() else app
             totals[name] = totals.get(name, 0.0) + secs
         whole = sum(totals.values()) or 1
         self.apps.delete(*self.apps.get_children())
+        if totals:
+            self.no_apps.place_forget()
+        else:
+            self.no_apps.place(relx=0.5, rely=0.5, anchor="center")
         for name, secs in sorted(totals.items(), key=lambda kv: -kv[1]):
-            image = self.app_icon(log["paths"].get(name.split("  (")[0]))
+            image = self.app_icon(self.app_path(name.split("  (")[0], log))
             self.apps.insert("", "end", text=f"  {name}", image=image,  # spaces: gap after the icon
                              values=(duration(secs), f"{secs / whole:.0%}"))
+
+    def app_path(self, app, log):
+        """The app's .exe from the shown log, else from this run's tracking (older logs have none)."""
+        return log.get("paths", {}).get(app) or APP_PATHS.get(app)
 
     def app_icon(self, path, large=False):
         """The app's icon, read from its .exe once and then cached; a blank one if it has none."""
@@ -430,25 +556,29 @@ class App:
         return self.icons[path, large] or blank
 
     def refresh_report(self, log=None):
-        log = log or self.tracker.snapshot()
-        self.draw_timeline(log["on_timeline"])
+        day = self.shown_day()
+        log = self.shown_log(log) or {}
+        self.date_button.config(text=f"{day:%d %b %Y}  ▾")
+        today = day == self.tracker.day
+        # Past days without PC-on times (no log, or logged before they were recorded): no data
+        self.draw_timeline(log.get("on_timeline") if today or log.get("on_timeline") else None, today)
         self.refresh_apps(log)
 
         # Top 3 by the same "Count by" measure as the list below, one entry per app
         apps = {}
-        for key, secs in log[self.kind.get()].items():
+        for key, secs in log.get(self.kind.get(), {}).items():
             app = key.split("|")[0]
             apps[app] = apps.get(app, 0.0) + secs
         top = sorted(apps.items(), key=lambda kv: -kv[1])[:3]
         column = self.top_apps.winfo_width() // 3
-        shown = [(app, int(secs) // 60, log["paths"].get(app)) for app, secs in top] + [column]
+        shown = [(app, int(secs) // 60, self.app_path(app, log)) for app, secs in top] + [column]
         if shown == self.top_shown:
             return
         self.top_shown = shown
         for widget in self.top_apps.winfo_children():
             widget.destroy()
         if not top:
-            ttk.Label(self.top_apps, text="No app time yet today.", style="Caption.TLabel").grid(sticky="w")
+            ttk.Label(self.top_apps, text="No data", style="NoData.TLabel").grid(row=0, column=0, columnspan=3, pady=8)
         gap = int(8 * self.scale)
         for col, (app, minutes, path) in enumerate(shown[:-1]):
             cell = ttk.Frame(self.top_apps)
@@ -463,12 +593,15 @@ class App:
             ttk.Label(cell, text=name, style="AppName.TLabel").grid(row=0, column=2, sticky="sw")
             ttk.Label(cell, text=duration(minutes * 60), style="Caption.TLabel").grid(row=1, column=2, sticky="nw")
 
-    def draw_timeline(self, spans):
-        """A 00:00-23:59 bar divided by hour, colored in where the PC was on."""
+    def draw_timeline(self, spans, today=True):
+        """A 00:00-23:59 bar divided by hour, colored in where the PC was on; "No data" if spans is None."""
         c, s = self.timeline, self.scale
         c.delete("all")
         width = c.winfo_width()
         if width < 50:  # not laid out yet
+            return
+        if spans is None:
+            c.create_text(width / 2, c.winfo_height() / 2, text="No data", fill="#888", font=("Segoe UI", 10))
             return
         left, right, top, bottom = 1, width - 1, 4 * s, 26 * s
         x = lambda sec: left + (right - left) * sec / 86400
@@ -487,7 +620,7 @@ class App:
             if h % step == 0:
                 label, anchor = ("23:59", "ne") if h == 24 else (f"{h:02d}:00", "nw" if h == 0 else "n")
                 c.create_text(xh, bottom + 8 * s, text=label, anchor=anchor, fill="#666", font=self.timeline_font)
-        if self.tracker.day == datetime.now().date():
+        if today:
             now = datetime.now()
             xn = x(now.hour * 3600 + now.minute * 60 + now.second)
             c.create_line(xn, top - 3 * s, xn, bottom + 3 * s, fill=TIMELINE_NOW, width=max(2, int(2 * s)))

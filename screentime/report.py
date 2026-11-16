@@ -27,6 +27,21 @@ def read_logs(last=None):
     return logs
 
 
+def logged_days():
+    """The dates (YYYY-MM-DD) that have a saved log."""
+    return {os.path.splitext(os.path.basename(p))[0]
+            for p in glob.glob(os.path.join(tracker.LOG_DIR, "????-??-??.json"))}
+
+
+def read_log(day):
+    """The saved log of a day (a date or YYYY-MM-DD), or None if there is none."""
+    try:
+        with open(os.path.join(tracker.LOG_DIR, f"{day}.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
 def summarize(log):
     """Return (PC on seconds, active seconds, top app) for one day's log."""
     apps = {}

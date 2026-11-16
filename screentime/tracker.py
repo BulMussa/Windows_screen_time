@@ -113,12 +113,17 @@ def uptime_seconds():
     return kernel32.GetTickCount64() / 1000.0
 
 
+def awake_seconds():
+    """Time since Windows started, sleep excluded."""
+    awake = ctypes.c_ulonglong()
+    kernel32.QueryUnbiasedInterruptTime(ctypes.byref(awake))  # 100ns units
+    return awake.value / 1e7
+
+
 def boot_time():
     """When the PC booted, or None if it has slept since (uptime then includes the sleep)."""
     uptime = uptime_seconds()
-    awake = ctypes.c_ulonglong()
-    kernel32.QueryUnbiasedInterruptTime(ctypes.byref(awake))  # 100ns units, sleep excluded
-    if uptime - awake.value / 1e7 > 60:
+    if uptime - awake_seconds() > 60:
         return None
     return datetime.now() - timedelta(seconds=uptime)
 
@@ -198,7 +203,10 @@ def load(day):
     log = {"total_seconds": 0.0, "active_seconds": 0.0, "first_seen": None, "last_seen": None,
            "stopped": False,  # stopped: the last run ended with a deliberate quit
            "paths": {},  # app name -> .exe path, so the window can show app icons
-           "on_timeline": []}  # when the PC was on, as [start, end] seconds after midnight
+           "on_timeline": [],  # when the PC was on, as [start, end] seconds after midnight
+           # Uptime and awake time at the last save: if both grew alike by the next start,
+           # the PC stayed on (no sleep, no restart) while the tracker wasn't running.
+           "saved_uptime": None, "saved_awake": None}
     log.update({k: defaultdict(float) for k in KINDS})
     path = log_path(day)
     if os.path.exists(path):
@@ -217,6 +225,7 @@ def load(day):
 
 def save(day, log):
     log["last_seen"] = datetime.now().isoformat(timespec="seconds")
+    log["saved_uptime"], log["saved_awake"] = uptime_seconds(), awake_seconds()
     os.makedirs(LOG_DIR, exist_ok=True)
     # Write to a temp file and swap it in, so a crash mid-write can't corrupt the log.
     path = log_path(day)
@@ -284,16 +293,21 @@ class Tracker:
         self.log = load(self.day)
         self.lock = threading.Lock()
 
-        # Count the time the PC was already on today before the script started:
-        # from boot, midnight or the last save of an earlier run, whichever is latest.
-        # Not after a deliberate quit (that time wasn't tracked on purpose), and not after
-        # a sleep (the uptime then can't tell when the PC was on): start counting now.
+        # Count the time the PC was already on today before the script started.
+        # Not after a deliberate quit: that time wasn't tracked on purpose.
+        # If the PC stayed on since the last save (e.g. a restart or update of this app): from then.
+        # Else if it never slept since booting: from boot, midnight or the last save, whichever is latest.
+        # Else the uptime can't tell when the PC was on: start counting now.
+        midnight = datetime.combine(self.day, datetime.min.time())
         boot = boot_time()
         since = now
-        if boot and not self.log["stopped"]:
-            since = max(boot, datetime.combine(self.day, datetime.min.time()))
-            if self.log["last_seen"]:
-                since = max(since, datetime.fromisoformat(self.log["last_seen"]))
+        if not self.log["stopped"]:
+            if self.on_since_last_save():
+                since = max(midnight, datetime.fromisoformat(self.log["last_seen"]))
+            elif boot:
+                since = max(boot, midnight)
+                if self.log["last_seen"]:
+                    since = max(since, datetime.fromisoformat(self.log["last_seen"]))
         self.log["total_seconds"] += max(0.0, (now - since).total_seconds())
         self.mark_on(since, now)
         self.log["first_seen"] = self.log["first_seen"] or since.isoformat(timespec="seconds")
@@ -338,6 +352,15 @@ class Tracker:
         with self.lock:
             self.log["stopped"] = stopped
             save(self.day, self.log)
+
+    def on_since_last_save(self):
+        """True if the PC stayed on, without a restart or sleep, since today's log was last saved."""
+        up, awake = self.log["saved_uptime"], self.log["saved_awake"]
+        if up is None or awake is None or not self.log["last_seen"]:
+            return False  # saved by an older version
+        now_up = uptime_seconds()
+        slept = (now_up - up) - (awake_seconds() - awake)
+        return now_up >= up and slept < 60  # uptime went back: restarted since
 
     def mark_on(self, start, end):
         """Add start-end (today) to the PC-on timeline, extending the last stretch if it touches."""
