@@ -8,12 +8,13 @@ import json
 import os
 import sys
 
-from .tracker import LOG_DIR, fmt
+from . import tracker
+from .tracker import fmt
 
 
 def read_logs(last=None):
     """Return [(date string, log dict)] for the saved days, oldest first."""
-    paths = sorted(glob.glob(os.path.join(LOG_DIR, "????-??-??.json")))
+    paths = sorted(glob.glob(os.path.join(tracker.LOG_DIR, "????-??-??.json")))
     if last:
         paths = paths[-last:]
     logs = []
@@ -39,7 +40,7 @@ def summarize(log):
 def main():
     logs = read_logs(int(sys.argv[1]) if len(sys.argv) > 1 else None)
     if not logs:
-        print(f"No logs found in {LOG_DIR}")
+        print(f"No logs found in {tracker.LOG_DIR}")
         return
 
     print(f"{'Date':<12} {'PC on':>12} {'Active':>12}  Top app")

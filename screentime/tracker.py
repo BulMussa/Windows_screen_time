@@ -127,6 +127,9 @@ def monitor_name(hmon):
     return "unknown"
 
 
+APP_PATHS = {}  # app name -> full .exe path, for the app icons in the window
+
+
 def app_name(hwnd):
     if not hwnd:
         return None
@@ -139,7 +142,9 @@ def app_name(hwnd):
         buf = ctypes.create_unicode_buffer(1024)
         size = wintypes.DWORD(len(buf))
         if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return os.path.basename(buf.value)
+            name = os.path.basename(buf.value)
+            APP_PATHS[name] = buf.value
+            return name
         return f"pid {pid.value}"
     finally:
         kernel32.CloseHandle(handle)
@@ -186,7 +191,8 @@ def log_path(day):
 
 def load(day):
     log = {"total_seconds": 0.0, "active_seconds": 0.0, "first_seen": None, "last_seen": None,
-           "stopped": False}  # stopped: the last run ended with a deliberate quit
+           "stopped": False,  # stopped: the last run ended with a deliberate quit
+           "paths": {}}  # app name -> .exe path, so the window can show app icons
     log.update({k: defaultdict(float) for k in KINDS})
     path = log_path(day)
     if os.path.exists(path):
@@ -240,6 +246,11 @@ def request_quit(timeout=10.0):
         return None
     kernel32.SetEvent(event)
     kernel32.CloseHandle(event)
+    return wait_until_stopped(timeout)
+
+
+def wait_until_stopped(timeout=10.0):
+    """Wait until no tracker or app is running; True if that happened within timeout."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         mutex = kernel32.OpenMutexW(SYNCHRONIZE, False, MUTEX_NAME)
@@ -308,6 +319,8 @@ class Tracker:
                     key = f"{item[0]}|{item[1]}"
                     self.log[kind][key] += TICK
                     seen.add(key)
+                    if item[0] in APP_PATHS:
+                        self.log["paths"][item[0]] = APP_PATHS[item[0]]
             for key in seen:
                 self.log["active"][key] += TICK
 
@@ -321,7 +334,7 @@ class Tracker:
     def snapshot(self):
         """A copy of today's log that is safe to read from another thread."""
         with self.lock:
-            return {k: dict(v) if k in KINDS else v for k, v in self.log.items()}
+            return {k: dict(v) if isinstance(v, dict) else v for k, v in self.log.items()}
 
 
 def main():
