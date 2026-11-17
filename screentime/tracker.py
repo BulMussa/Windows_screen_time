@@ -204,6 +204,7 @@ def load(day):
            "stopped": False,  # stopped: the last run ended with a deliberate quit
            "paths": {},  # app name -> .exe path, so the window can show app icons
            "on_timeline": [],  # when the PC was on, as [start, end] seconds after midnight
+           "active_timeline": [],  # when you were active, same format (days logged before it have none)
            # Uptime and awake time at the last save: if both grew alike by the next start,
            # the PC stayed on (no sleep, no restart) while the tracker wasn't running.
            "saved_uptime": None, "saved_awake": None}
@@ -334,6 +335,7 @@ class Tracker:
             if locked or idle_seconds() > IDLE_LIMIT:
                 return
             self.log["active_seconds"] += TICK
+            self.mark_on(now - timedelta(seconds=TICK), now, "active_timeline")
             focus, cursor = sample()
             seen = set()
             for kind, item in (("focus", focus), ("cursor", cursor)):
@@ -362,14 +364,14 @@ class Tracker:
         slept = (now_up - up) - (awake_seconds() - awake)
         return now_up >= up and slept < 60  # uptime went back: restarted since
 
-    def mark_on(self, start, end):
-        """Add start-end (today) to the PC-on timeline, extending the last stretch if it touches."""
+    def mark_on(self, start, end, timeline="on_timeline"):
+        """Add start-end (today) to a timeline (PC on by default), extending the last stretch if it touches."""
         midnight = datetime.combine(self.day, datetime.min.time())
         a = max(0, round((start - midnight).total_seconds()))
         b = round((end - midnight).total_seconds())
         if b <= a:
             return
-        spans = self.log["on_timeline"]
+        spans = self.log[timeline]
         if spans and a - spans[-1][1] <= MAX_GAP:
             spans[-1][1] = max(spans[-1][1], b)
         else:

@@ -23,7 +23,7 @@ from datetime import date, datetime
 from ctypes import wintypes
 from tkinter import font as tkfont, messagebox, ttk
 
-from . import tracker
+from . import sync, tracker
 from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
                       Tracker, already_running, on_quit_request, quit_command, uptime_seconds, user32,
                       wait_until_stopped)
@@ -494,6 +494,44 @@ class App:
         note(settings, "Saves today's log and starts Screen Time again, e.g. if something looks stuck.", pady=(4, 8))
         ttk.Button(settings, text="Restart Screen Time", command=self.restart).pack(anchor="w")
 
+        # Sync tab: sends the logs to your own server
+        sync_tab = ttk.Frame(tabs, padding=12)
+        tabs.add(sync_tab, text="Sync")
+        ttk.Label(sync_tab, text="Server sync", style="Heading.TLabel").pack(anchor="w")
+        note(sync_tab, "Sends your PC-on, active and app times to your own server, so your other devices can "
+                       "show them. The password is only used to register this PC and is never saved.",
+             pady=(4, 8))
+        self.sync_status = tk.StringVar()
+        status = ttk.Label(sync_tab, textvariable=self.sync_status, style="Caption.TLabel")
+        status.pack(fill="x")
+        status.bind("<Configure>", lambda e: status.configure(wraplength=e.width))
+        self.sync_form = ttk.Frame(sync_tab)
+        self.sync_fields = {}
+        for row, (label, key, default, secret) in enumerate((
+                ("Server", "server", "", False), ("Name", "name", "", False),
+                ("Password", "password", "", True), ("Device name", "device", sync.default_device_name(), False))):
+            ttk.Label(self.sync_form, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            self.sync_fields[key] = tk.StringVar(value=default)
+            ttk.Entry(self.sync_form, textvariable=self.sync_fields[key], show="•" if secret else "") \
+                .grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=3)
+        self.sync_form.columnconfigure(1, weight=1)
+        self.sync_error = tk.StringVar()
+        error = ttk.Label(self.sync_form, textvariable=self.sync_error, foreground="#dc2626")
+        error.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        error.bind("<Configure>", lambda e: error.configure(wraplength=e.width))
+        self.connect_button = ttk.Button(self.sync_form, text="Connect", command=self.connect_sync)
+        self.connect_button.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.sync_connected = ttk.Frame(sync_tab)
+        self.sync_info = tk.StringVar()
+        info = ttk.Label(self.sync_connected, textvariable=self.sync_info)
+        info.pack(fill="x")
+        info.bind("<Configure>", lambda e: info.configure(wraplength=e.width))
+        buttons = ttk.Frame(self.sync_connected)
+        buttons.pack(anchor="w", pady=(8, 0))
+        ttk.Button(buttons, text="Sync now", command=self.sync_now).pack(side="left")
+        ttk.Button(buttons, text="Disconnect", command=self.disconnect_sync).pack(side="left", padx=(8, 0))
+        self.show_sync_state()
+
         # Footer
         foot = ttk.Frame(root, padding=(16, 0, 16, 12))
         foot.pack(fill="x", side="bottom", before=tabs)  # space kept first, so the tabs can't squeeze it out
@@ -508,6 +546,8 @@ class App:
             None,
             ("Quit tracking", lambda: self.calls.put(self.quit)),
         ])
+        self.syncer = sync.SyncWorker(tracker, lambda text: self.calls.put(lambda: self.sync_status.set(text)))
+        self.syncer.start()
         threading.Thread(target=self.track, daemon=True).start()
         self.refresh()
         self.run_calls()
@@ -747,6 +787,55 @@ class App:
         except OSError as e:
             messagebox.showerror("Screen Time", f"Couldn't save the setting:\n{e}")
 
+    def show_sync_state(self):
+        """Show the connected panel or the connect form, whichever applies."""
+        state = sync.load_state()
+        if state["server"] and sync.load_token():
+            self.sync_form.pack_forget()
+            self.sync_info.set(f"Connected to {state['server']} as \"{state['device_name']}\".")
+            self.sync_connected.pack(fill="x", pady=(12, 0))
+            self.sync_status.set("Waiting for the first sync...")
+        else:
+            self.sync_connected.pack_forget()
+            self.sync_form.pack(fill="x", pady=(12, 0))
+            self.sync_status.set("Not connected")
+
+    def connect_sync(self):
+        fields = {key: var.get() for key, var in self.sync_fields.items()}
+        self.sync_error.set("")
+        self.sync_status.set("Connecting...")
+        self.connect_button.state(["disabled"])
+
+        def work():  # off the Tk thread: it waits for the server
+            try:
+                sync.connect(fields["server"], fields["name"], fields["password"], fields["device"])
+                error = None
+            except (sync.SyncError, OSError) as e:
+                error = str(e)
+            self.calls.put(lambda: self.connect_done(error))
+        threading.Thread(target=work, daemon=True).start()
+
+    def connect_done(self, error):
+        self.connect_button.state(["!disabled"])
+        if error:
+            self.sync_error.set(error)
+            self.sync_status.set("Not connected")
+            return
+        self.sync_fields["password"].set("")
+        self.show_sync_state()
+        self.sync_status.set("Connected. Syncing...")
+        self.syncer.sync_now()
+
+    def sync_now(self):
+        self.sync_status.set("Syncing...")
+        self.syncer.sync_now()
+
+    def disconnect_sync(self):
+        if messagebox.askyesno("Screen Time", "Disconnect from the server?\n\nWhat was already sent stays "
+                                              "there, and this PC stops sending."):
+            sync.disconnect()
+            self.show_sync_state()
+
     def open_logs(self):
         os.makedirs(LOG_DIR, exist_ok=True)
         subprocess.Popen(["explorer", LOG_DIR])
@@ -769,6 +858,7 @@ class App:
     def quit(self, stopped=True):
         """stopped=False (from --quit) saves without the deliberate-quit mark, like a restart."""
         self.stop.set()
+        self.syncer.close()
         self.tracker.save(stopped=stopped)
         self.tray.remove()
         self.root.destroy()
