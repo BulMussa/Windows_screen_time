@@ -7,9 +7,11 @@ already sent) is in sync_state.json next to the logs folder.
 
 Days are the PC's own calendar days, so keep this PC on the timezone set for your account.
 """
+import copy
 import ctypes
 import json
 import os
+import re
 import socket
 import threading
 import urllib.error
@@ -17,7 +19,7 @@ import urllib.request
 import uuid
 from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 from . import tracker
 from .report import logged_days, read_log
@@ -30,6 +32,8 @@ TIMEOUT = 20
 CRED_TARGET = "ScreenTimeSync"  # where the device token is kept in Credential Manager
 INTERVAL_NAMESPACE = uuid.UUID("5c1a7e0e-3f0b-4b53-9d7c-6b1f4a0e2a10")  # makes the interval IDs repeatable
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")  # the only addresses allowed without HTTPS
+REMOTE_KINDS = ("phone_active", "sleep")  # the pulled intervals the window shows; this PC's own come from its logs
+PULL_LIMIT = 1000  # rows per pull request
 
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 CRED_TYPE_GENERIC, CRED_PERSIST_LOCAL_MACHINE = 1, 2
@@ -124,6 +128,50 @@ def save_state(state):
     os.replace(path + ".tmp", path)
 
 
+def remote_path():
+    """Intervals pulled from the server, next to the state file."""
+    return os.path.join(os.path.dirname(tracker.LOG_DIR), "remote_intervals.json")
+
+
+_remote_cache = {"stamp": None, "data": None}
+
+
+def load_remote():
+    """{"cursor": ..., "intervals": {id: [kind, start, end, updated_at, device_id]}} (times are UTC epoch
+    seconds). The result is replaced, never changed, when the file does, so readers can keep it."""
+    empty = {"cursor": "0", "intervals": {}}
+    path = remote_path()
+    try:
+        stamp = (path, os.stat(path).st_mtime_ns)
+    except OSError:
+        return empty
+    if _remote_cache["stamp"] != stamp:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return empty
+        data.setdefault("cursor", "0")
+        data.setdefault("intervals", {})
+        _remote_cache.update(stamp=stamp, data=data)
+    return _remote_cache["data"]
+
+
+def save_remote(remote):
+    path = remote_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(remote, f)
+    os.replace(path + ".tmp", path)
+
+
+def reset_remote():
+    try:
+        os.remove(remote_path())
+    except OSError:
+        pass
+
+
 def connected():
     return bool(load_state()["server"] and load_token())
 
@@ -189,6 +237,7 @@ def connect(server, name, password, device_name):
         state.update(server=server, device_id=device["device_id"], device_name=device["name"],
                      sent={}, done_days=[], last_sync=None)
         save_state(state)
+        reset_remote()  # a new server has its own history to pull
 
 
 def disconnect():
@@ -198,6 +247,7 @@ def disconnect():
         state = load_state()
         state.update(server=None, device_id=None, device_name=None, sent={}, done_days=[], last_sync=None)
         save_state(state)
+        reset_remote()
 
 
 # --- What to send ---
@@ -289,6 +339,60 @@ def sync_once(today, today_log):
         return sent, rejected
 
 
+def parse_utc(text):
+    """UTC epoch seconds of a server timestamp like 2026-11-10T04:05:00Z or ...00.928605Z."""
+    match = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", text)
+    if not match:
+        raise ValueError(f"unexpected timestamp {text!r}")
+    base = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+    return base.timestamp() + float(match.group(2) or 0)
+
+
+def apply_pulled(remote, row):
+    """Apply one pulled interval: keep it only if it's newer than ours; deleted ones are removed."""
+    if row["kind"] not in REMOTE_KINDS:
+        return False
+    updated = parse_utc(row["updated_at"])
+    old = remote["intervals"].get(row["id"])
+    if old and old[3] >= updated:
+        return False
+    if row.get("deleted_at"):
+        return remote["intervals"].pop(row["id"], None) is not None
+    remote["intervals"][row["id"]] = [row["kind"], parse_utc(row["start_utc"]), parse_utc(row["end_utc"]),
+                                      updated, row.get("device_id")]
+    return True
+
+
+def pull_once():
+    """Fetch what changed on the server since last time (phone and sleep intervals are kept).
+
+    Returns how many stored intervals changed; raises SyncError.
+    """
+    with _lock:
+        state, token = load_state(), load_token()
+        if not state["server"] or not token:
+            raise SyncError("Not connected")
+        remote = copy.deepcopy(load_remote())
+        changed, restarted = 0, False
+        while True:
+            query = urlencode({"cursor": remote["cursor"], "limit": PULL_LIMIT})
+            try:
+                page = request(state["server"], "GET", f"/v1/sync/pull?{query}", token=token)
+            except SyncError as e:
+                if e.status == 400 and remote["cursor"] != "0" and not restarted:
+                    remote, restarted = {"cursor": "0", "intervals": {}}, True  # the server doesn't know our cursor
+                    continue
+                raise
+            try:
+                changed += sum(apply_pulled(remote, row) for row in page["intervals"])
+            except (KeyError, ValueError, TypeError) as e:
+                raise SyncError(f"Unexpected data from the server ({e})") from None
+            remote["cursor"] = page["cursor"]
+            save_remote(remote)  # the cursor moves only after its page is applied and saved
+            if not page["has_more"]:
+                return changed
+
+
 class SyncWorker:
     """Syncs in the background every SYNC_EVERY seconds; on_status gets a short text after each try."""
 
@@ -320,6 +424,7 @@ class SyncWorker:
         """One sync try; returns how many seconds to wait before the next."""
         try:
             sent, rejected = sync_once(self.tracker.day, self.tracker.snapshot())
+            pull_once()
         except SyncError as e:
             if str(e) == "Not connected":
                 self.on_status("Not connected")
