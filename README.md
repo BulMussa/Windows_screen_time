@@ -43,6 +43,8 @@ It also adds an icon to the hidden icons menu (the ^ arrow next to the system cl
 - **Right-click** either one and choose **Quit tracking** to stop, or use the red **Quit tracking** button in the window. The green **Done** button (or closing the window) only hides it; tracking goes on.
 - From a terminal or script, `ScreenTime.exe --quit` (or `python -m screentime --quit`) makes the running copy save and exit, e.g. before rebuilding. Unlike **Quit tracking**, it counts as a restart: the time until the next start can still count as PC-on time.
 
+The **Sync** tab connects this PC to your own Screen Time server (HTTPS only; plain HTTP is accepted only for `localhost`). Enter the server address, your name and password, and a name for this PC. The password is used once to register the PC and is never saved; the device token goes into Windows Credential Manager, and the server address and what was already sent into `%LOCALAPPDATA%\ScreenTime\sync_state.json`. After that, changes to the PC-on and active periods and the per-app times are sent every 5 minutes (retried every minute while the server can't be reached), and only what changed. Use **Sync now** to send right away, or **Disconnect** to stop (the device stays registered on the server). Keep this PC on the timezone set for your account, since days follow the PC's clock. Days logged before this version have PC-on periods but no active periods.
+
 Tick **Start with Windows** in the Settings tab to launch it at login in the background. Untick **Show active time on the taskbar** to hide the widget in the taskbar's corner; the tray icon stays, and the choice is saved in `%LOCALAPPDATA%\ScreenTime\settings.json`.
 
 Only one tracker can run at a time; starting a second copy (app or console tracker) shows a message instead.
@@ -75,6 +77,7 @@ screentime/            the Python package
   tray.py              tray icon (Win32 via ctypes)
   icons.py             app icons for the Report tab, read from each .exe
   tracker.py           sampling, daily logs, console tracker
+  sync.py              server sync: connect, device token, background push
   report.py            per-day summary of the logs
   assets/              app icon
 packaging/
