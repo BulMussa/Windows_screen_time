@@ -11,6 +11,7 @@ Quit:    ScreenTime.exe --quit     (or python -m screentime --quit): saves and e
 import base64
 import calendar
 import ctypes
+import json
 import os
 import queue
 import subprocess
@@ -22,6 +23,7 @@ from datetime import date, datetime
 from ctypes import wintypes
 from tkinter import font as tkfont, messagebox, ttk
 
+from . import tracker
 from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
                       Tracker, already_running, on_quit_request, quit_command, uptime_seconds, user32,
                       wait_until_stopped)
@@ -90,6 +92,29 @@ def set_autostart(enabled):
                 winreg.DeleteValue(key, RUN_NAME)
             except FileNotFoundError:
                 pass
+
+
+def settings_path():
+    """settings.json next to the logs folder (looked up through tracker, so tests can redirect it)."""
+    return os.path.join(os.path.dirname(tracker.LOG_DIR), "settings.json")
+
+
+def load_settings():
+    settings = {"taskbar_clock": True}
+    try:
+        with open(settings_path()) as f:
+            settings.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+    return settings
+
+
+def save_settings(settings):
+    path = settings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(path + ".tmp", path)
 
 
 def light_theme():
@@ -165,6 +190,14 @@ def colored_button(parent, text, color, hover, command):
     return button
 
 
+def note(parent, text, **pack):
+    """A gray caption that wraps to the width it gets."""
+    label = ttk.Label(parent, text=text, style="Caption.TLabel")
+    label.pack(fill="x", **pack)
+    label.bind("<Configure>", lambda e: label.configure(wraplength=e.width))
+    return label
+
+
 def make_table(parent, columns, tree_column=None):
     """A Treeview with a scrollbar; columns is [(name, width, anchor)].
 
@@ -197,6 +230,7 @@ class TaskbarClock:
 
     def __init__(self, app):
         self.app = app
+        self.enabled = app.settings["taskbar_clock"]  # the Settings tab turns it on and off
         light = light_theme()
         # Pixels in this color turn see-through. It is close to the taskbar's own color
         # so the anti-aliased edges of the text blend in.
@@ -225,7 +259,7 @@ class TaskbarClock:
 
     def place(self):
         rect = visible_taskbar()
-        if rect is None:
+        if rect is None or not self.enabled:
             self.win.withdraw()
         else:
             self.win.update_idletasks()
@@ -329,12 +363,13 @@ class App:
     def __init__(self, root, tracker):
         self.root = root
         self.tracker = tracker
+        self.settings = load_settings()
         self.stop = threading.Event()
         self.ticks = 0
 
         root.title("Screen Time")
-        root.geometry("560x700")
-        root.minsize(440, 560)
+        root.geometry("560x720")
+        root.minsize(440, 720)  # room for every Settings section
         root.protocol("WM_DELETE_WINDOW", root.withdraw)  # hide; the clock and tray icon stay
         if os.path.exists(ICON):
             root.iconbitmap(default=ICON)
@@ -436,16 +471,20 @@ class App:
         ttk.Label(settings, text="Startup", style="Heading.TLabel").pack(anchor="w")
         ttk.Checkbutton(settings, text="Start with Windows", variable=self.autostart,
                         command=self.toggle_autostart).pack(anchor="w", pady=(6, 0))
-        ttk.Label(settings, text="Opens at login with only the taskbar clock showing.",
-                  style="Caption.TLabel").pack(anchor="w", padx=(21, 0))
+        note(settings, "Opens at login in the background.", padx=(21, 0))
+        ttk.Separator(settings).pack(fill="x", pady=14)
+        ttk.Label(settings, text="Taskbar", style="Heading.TLabel").pack(anchor="w")
+        self.show_clock = tk.BooleanVar(value=self.settings["taskbar_clock"])
+        ttk.Checkbutton(settings, text="Show active time on the taskbar", variable=self.show_clock,
+                        command=self.toggle_clock).pack(anchor="w", pady=(6, 0))
+        note(settings, "In its bottom-left corner. The tray icon stays either way.", padx=(21, 0))
         ttk.Separator(settings).pack(fill="x", pady=14)
         ttk.Label(settings, text="Logs", style="Heading.TLabel").pack(anchor="w")
         ttk.Label(settings, text=LOG_DIR, style="Caption.TLabel").pack(anchor="w", pady=(4, 8))
         ttk.Button(settings, text="Open logs folder", command=self.open_logs).pack(anchor="w")
         ttk.Separator(settings).pack(fill="x", pady=14)
         ttk.Label(settings, text="App", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(settings, text="Saves today's log and starts Screen Time again, e.g. if something looks stuck.",
-                  style="Caption.TLabel").pack(anchor="w", pady=(4, 8))
+        note(settings, "Saves today's log and starts Screen Time again, e.g. if something looks stuck.", pady=(4, 8))
         ttk.Button(settings, text="Restart Screen Time", command=self.restart).pack(anchor="w")
 
         # Footer
@@ -498,6 +537,8 @@ class App:
         self.root.after(100, self.run_calls)
 
     def show(self):
+        if self.root.state() != "normal":  # reopening a hidden or minimized window: start on Report
+            self.tabs.select(0)
         self.ticks = 0  # refresh everything right away
         self.root.deiconify()
         self.root.lift()
@@ -646,6 +687,15 @@ class App:
         except OSError as e:
             self.autostart.set(not self.autostart.get())
             messagebox.showerror("Screen Time", f"Couldn't change the startup setting:\n{e}")
+
+    def toggle_clock(self):
+        self.settings["taskbar_clock"] = self.clock.enabled = self.show_clock.get()
+        if not self.clock.enabled:
+            self.clock.win.withdraw()  # turning it on shows it at its next placement, within RAISE_EVERY
+        try:
+            save_settings(self.settings)
+        except OSError as e:
+            messagebox.showerror("Screen Time", f"Couldn't save the setting:\n{e}")
 
     def open_logs(self):
         os.makedirs(LOG_DIR, exist_ok=True)
