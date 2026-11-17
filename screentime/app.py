@@ -39,6 +39,7 @@ HISTORY_REFRESH = 60
 CLOCK_OFFSET = 12  # pixels from the left end of the taskbar
 RAISE_EVERY = 500  # ms; the taskbar covers the clock when clicked, so keep raising it
 TIMELINE_TRACK, TIMELINE_ON, TIMELINE_NOW = "#e5e7eb", "#2563eb", "#dc2626"
+TIMELINE_HOVER = "#1e3a8a"  # a PC-on period under the mouse
 ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "screentime.ico")
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -423,6 +424,12 @@ class App:
                                   bg=style.lookup("TFrame", "background") or root.cget("bg"))
         self.timeline.pack(fill="x", pady=(6, 0))
         self.timeline.bind("<Configure>", lambda e: self.refresh_report())
+        self.timeline.bind("<Motion>", self.hover_timeline)
+        self.timeline.bind("<Enter>", self.hover_timeline)  # entering lands on a period without a <Motion>
+        self.timeline.bind("<Leave>", lambda e: self.hover_timeline(None))
+        self.periods = []  # (canvas item, start, end) of each PC-on period drawn
+        self.hover = None  # the last mouse event over the timeline, to keep the pop-up through redraws
+        self.tip = None
         ttk.Separator(report).pack(fill="x", pady=10)
         ttk.Label(report, text="Most used apps", style="Heading.TLabel").pack(anchor="w")
         self.top_apps = ttk.Frame(report)
@@ -638,11 +645,13 @@ class App:
         """A 00:00-23:59 bar divided by hour, colored in where the PC was on; "No data" if spans is None."""
         c, s = self.timeline, self.scale
         c.delete("all")
+        self.periods = []
         width = c.winfo_width()
         if width < 50:  # not laid out yet
             return
         if spans is None:
             c.create_text(width / 2, c.winfo_height() / 2, text="No data", fill="#888", font=("Segoe UI", 10))
+            self.hover_timeline(None)
             return
         left, right, top, bottom = 1, width - 1, 4 * s, 26 * s
         x = lambda sec: left + (right - left) * sec / 86400
@@ -651,7 +660,8 @@ class App:
         for h in range(1, 24):  # thin gaps divide the gray bar into hours; drawn first, so on-time covers them
             c.create_line(x(h * 3600), top, x(h * 3600), bottom, fill=bg)
         for start, end in spans:
-            c.create_rectangle(x(start), top, max(x(end), x(start) + 1), bottom, fill=TIMELINE_ON, outline="")
+            item = c.create_rectangle(x(start), top, max(x(end), x(start) + 1), bottom, fill=TIMELINE_ON, outline="")
+            self.periods.append((item, start, end))
         # A label every 3 hours, or every 6 when the bar is too narrow for them to fit side by side
         label_width = self.timeline_font.measure("00:00")
         step = 3 if x(3 * 3600) - x(0) >= 1.5 * label_width + 6 * s else 6
@@ -665,6 +675,46 @@ class App:
             now = datetime.now()
             xn = x(now.hour * 3600 + now.minute * 60 + now.second)
             c.create_line(xn, top - 3 * s, xn, bottom + 3 * s, fill=TIMELINE_NOW, width=max(2, int(2 * s)))
+        self.hover_timeline(self.hover)  # a redraw keeps the period under the mouse highlighted
+
+    def hover_timeline(self, event):
+        """Highlight the PC-on period under the mouse and show its times in a pop-up."""
+        self.hover = event
+        c = self.timeline
+        found = None
+        if event is not None:
+            slack = 2 * self.scale  # thin periods are hard to hit exactly
+            for item, start, end in self.periods:
+                x1, y1, x2, y2 = c.coords(item)
+                if x1 - slack <= event.x <= x2 + slack and y1 - slack <= event.y <= y2 + slack:
+                    found = (item, start, end)
+                    break
+        for item, start, end in self.periods:
+            c.itemconfigure(item, fill=TIMELINE_HOVER if found and item == found[0] else TIMELINE_ON)
+        if not found:
+            if self.tip:
+                self.tip.destroy()
+                self.tip = None
+            return
+        _, start, end = found
+        hm = lambda sec: f"{int(sec) // 3600:02d}:{int(sec) % 3600 // 60:02d}"
+        lines = [f"{hm(start)} \u2013 {hm(end)}", "PC on", short(end - start)]
+        if not self.tip:
+            self.tip = tk.Toplevel(self.root)
+            self.tip.overrideredirect(True)
+            self.tip.attributes("-topmost", True)
+            box = tk.Frame(self.tip, bg="#111827", padx=8, pady=5)
+            box.pack()
+            def label(row, column, fg="white", font=("Segoe UI", 9), **grid):
+                widget = tk.Label(box, bg="#111827", fg=fg, font=font, padx=0, pady=0)
+                widget.grid(row=row, column=column, **grid)
+                return widget
+            # The time range on top, then the name on the left and its value on the right
+            self.tip_labels = [label(0, 0, font=("Segoe UI Semibold", 9), columnspan=2, sticky="w"),
+                               label(1, 0, fg="#9ca3af", sticky="w", padx=(0, 12)), label(1, 1, sticky="e")]
+        for widget, text in zip(self.tip_labels, lines):
+            widget.configure(text=text)
+        self.tip.geometry(f"+{event.x_root + 14}+{event.y_root + 16}")
 
     def refresh_history(self, log=None):
         today = log or self.tracker.snapshot()
