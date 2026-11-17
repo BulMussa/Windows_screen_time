@@ -29,6 +29,7 @@ from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONIT
                       wait_until_stopped)
 from .icons import icon_png, large_icon_size, small_icon_size
 from .report import logged_days, read_log, read_logs, summarize
+from .timeline import day_spans, total
 from .tray import TrayIcon
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -39,7 +40,10 @@ HISTORY_REFRESH = 60
 CLOCK_OFFSET = 12  # pixels from the left end of the taskbar
 RAISE_EVERY = 500  # ms; the taskbar covers the clock when clicked, so keep raising it
 TIMELINE_TRACK, TIMELINE_ON, TIMELINE_NOW = "#e5e7eb", "#2563eb", "#dc2626"
-TIMELINE_HOVER = "#1e3a8a"  # a PC-on period under the mouse
+TIMELINE_HOVER = "#1e3a8a"  # a laptop active period under the mouse
+TIMELINE_ON_LIGHT, TIMELINE_ON_LIGHT_HOVER = "#93c5fd", "#60a5fa"  # PC on, under the active periods
+TIMELINE_PHONE, TIMELINE_PHONE_HOVER = "#f97316", "#c2410c"
+TIMELINE_SLEEP, TIMELINE_SLEEP_HOVER = "#7c3aed", "#5b21b6"
 ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "screentime.ico")
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -414,20 +418,20 @@ class App:
         tabs.add(report, text="Report")
         head = ttk.Frame(report)
         head.pack(fill="x")
-        ttk.Label(head, text="PC on", style="Heading.TLabel").pack(side="left")
+        ttk.Label(head, text="Timeline", style="Heading.TLabel").pack(side="left")
         self.report_day = None  # the day the Report shows; None follows today
         self.past_log = None  # that day's saved log when it isn't today (None: no data)
         self.date_picker = None
         self.date_button = ttk.Button(head, command=self.toggle_date_picker)
         self.date_button.pack(side="left", padx=(10, 0))
-        self.timeline = tk.Canvas(report, height=int(58 * self.scale), highlightthickness=0,
+        self.timeline = tk.Canvas(report, height=int(124 * self.scale), highlightthickness=0,
                                   bg=style.lookup("TFrame", "background") or root.cget("bg"))
         self.timeline.pack(fill="x", pady=(6, 0))
         self.timeline.bind("<Configure>", lambda e: self.refresh_report())
         self.timeline.bind("<Motion>", self.hover_timeline)
         self.timeline.bind("<Enter>", self.hover_timeline)  # entering lands on a period without a <Motion>
         self.timeline.bind("<Leave>", lambda e: self.hover_timeline(None))
-        self.periods = []  # (canvas item, start, end) of each PC-on period drawn
+        self.periods = []  # (canvas item, start, end, title, color, hover color) of each period drawn
         self.hover = None  # the last mouse event over the timeline, to keep the pop-up through redraws
         self.tip = None
         ttk.Separator(report).pack(fill="x", pady=10)
@@ -546,7 +550,7 @@ class App:
             None,
             ("Quit tracking", lambda: self.calls.put(self.quit)),
         ])
-        self.syncer = sync.SyncWorker(tracker, lambda text: self.calls.put(lambda: self.sync_status.set(text)))
+        self.syncer = sync.SyncWorker(tracker, lambda text: self.calls.put(lambda: self.sync_status_changed(text)))
         self.syncer.start()
         threading.Thread(target=self.track, daemon=True).start()
         self.refresh()
@@ -648,8 +652,9 @@ class App:
         log = self.shown_log(log) or {}
         self.date_button.config(text=f"{day:%d %b %Y}  ▾")
         today = day == self.tracker.day
-        # Past days without PC-on times (no log, or logged before they were recorded): no data
-        self.draw_timeline(log.get("on_timeline") if today or log.get("on_timeline") else None, today)
+        # Past days without PC-on times (no log, or logged before they were recorded) and without
+        # phone or sleep data from the server: no data
+        self.draw_timeline(self.timeline_rows(day, log, today), today)
         self.refresh_apps(log)
 
         # Top 3 by the same "Count by" measure as the list below, one entry per app
@@ -681,27 +686,63 @@ class App:
             ttk.Label(cell, text=name, style="AppName.TLabel").grid(row=0, column=2, sticky="sw")
             ttk.Label(cell, text=duration(minutes * 60), style="Caption.TLabel").grid(row=1, column=2, sticky="nw")
 
-    def draw_timeline(self, spans, today=True):
-        """A 00:00-23:59 bar divided by hour, colored in where the PC was on; "No data" if spans is None."""
+    def timeline_rows(self, day, log, today):
+        """What the timeline shows: None if there is no data at all, else [(name, summary, hint, parts)].
+
+        parts are (title, color, hover color, spans) drawn in order; hint is for a row with no data.
+        """
+        on = log.get("on_timeline") if today or log.get("on_timeline") else None
+        active = log.get("active_timeline") or []
+        laptop = []
+        if on is not None:
+            if active:  # active periods drawn over the PC-on ones
+                laptop = [("Laptop · PC on", TIMELINE_ON_LIGHT, TIMELINE_ON_LIGHT_HOVER, on),
+                          ("Laptop · Active", TIMELINE_ON, TIMELINE_HOVER, active)]
+            else:  # days logged before active periods were recorded
+                laptop = [("Laptop · PC on", TIMELINE_ON, TIMELINE_HOVER, on)]
+        remote = sync.load_remote()
+        phone, sleep = day_spans(remote, day, "phone_active"), day_spans(remote, day, "sleep")
+        if on is None and not phone and not sleep:
+            return None
+        hint = "" if sync.load_state()["server"] else "Not connected (Sync tab)"
+        return [("Laptop", f"{short(log.get('active_seconds', 0))} active" if on is not None else "", "", laptop),
+                ("Phone", short(total(phone)) if phone else "", hint,
+                 [("Phone · Active", TIMELINE_PHONE, TIMELINE_PHONE_HOVER, phone)]),
+                ("Sleep", short(total(sleep)) if sleep else "", hint,
+                 [("Sleep", TIMELINE_SLEEP, TIMELINE_SLEEP_HOVER, sleep)])]
+
+    def draw_timeline(self, rows, today=True):
+        """Laptop, phone and sleep as 00:00-23:59 bars divided by hour, colored in where each was
+        on; "No data" if rows is None."""
         c, s = self.timeline, self.scale
         c.delete("all")
         self.periods = []
         width = c.winfo_width()
         if width < 50:  # not laid out yet
             return
-        if spans is None:
+        if rows is None:
             c.create_text(width / 2, c.winfo_height() / 2, text="No data", fill="#888", font=("Segoe UI", 10))
             self.hover_timeline(None)
             return
-        left, right, top, bottom = 1, width - 1, 4 * s, 26 * s
+        left, right, top, row_h, pitch = int(78 * s), width - 1, 4 * s, 26 * s, 34 * s
+        bottom = top + (len(rows) - 1) * pitch + row_h
         x = lambda sec: left + (right - left) * sec / 86400
-        c.create_rectangle(left, top, right, bottom, fill=TIMELINE_TRACK, outline="")
         bg = c.cget("bg")
-        for h in range(1, 24):  # thin gaps divide the gray bar into hours; drawn first, so on-time covers them
-            c.create_line(x(h * 3600), top, x(h * 3600), bottom, fill=bg)
-        for start, end in spans:
-            item = c.create_rectangle(x(start), top, max(x(end), x(start) + 1), bottom, fill=TIMELINE_ON, outline="")
-            self.periods.append((item, start, end))
+        for i, (name, summary, hint, parts) in enumerate(rows):
+            y1 = top + i * pitch
+            y2 = y1 + row_h
+            mid = (y1 + y2) / 2
+            c.create_text(2, mid, text=name, anchor="sw", fill="#111", font=self.app_name_font)
+            c.create_text(2, mid + 1, text=summary, anchor="nw", fill="#666", font=self.timeline_font)
+            c.create_rectangle(left, y1, right, y2, fill=TIMELINE_TRACK, outline="")
+            for h in range(1, 24):  # thin gaps divide the gray bar into hours; the colored spans cover them
+                c.create_line(x(h * 3600), y1, x(h * 3600), y2, fill=bg)
+            for title, color, hover, spans in parts:
+                for start, end in spans:
+                    item = c.create_rectangle(x(start), y1, max(x(end), x(start) + 1), y2, fill=color, outline="")
+                    self.periods.append((item, start, end, title, color, hover))
+            if hint and not any(spans for *_, spans in parts):
+                c.create_text((left + right) / 2, mid, text=hint, fill="#888", font=self.timeline_font)
         # A label every 3 hours, or every 6 when the bar is too narrow for them to fit side by side
         label_width = self.timeline_font.measure("00:00")
         step = 3 if x(3 * 3600) - x(0) >= 1.5 * label_width + 6 * s else 6
@@ -718,27 +759,27 @@ class App:
         self.hover_timeline(self.hover)  # a redraw keeps the period under the mouse highlighted
 
     def hover_timeline(self, event):
-        """Highlight the PC-on period under the mouse and show its times in a pop-up."""
+        """Highlight the period under the mouse and show its times in a pop-up."""
         self.hover = event
         c = self.timeline
         found = None
         if event is not None:
             slack = 2 * self.scale  # thin periods are hard to hit exactly
-            for item, start, end in self.periods:
-                x1, y1, x2, y2 = c.coords(item)
+            for period in reversed(self.periods):  # the last one drawn is on top
+                x1, y1, x2, y2 = c.coords(period[0])
                 if x1 - slack <= event.x <= x2 + slack and y1 - slack <= event.y <= y2 + slack:
-                    found = (item, start, end)
+                    found = period
                     break
-        for item, start, end in self.periods:
-            c.itemconfigure(item, fill=TIMELINE_HOVER if found and item == found[0] else TIMELINE_ON)
+        for period in self.periods:
+            c.itemconfigure(period[0], fill=period[5] if period is found else period[4])
         if not found:
             if self.tip:
                 self.tip.destroy()
                 self.tip = None
             return
-        _, start, end = found
+        _, start, end, title, _, _ = found
         hm = lambda sec: f"{int(sec) // 3600:02d}:{int(sec) % 3600 // 60:02d}"
-        lines = [f"{hm(start)} \u2013 {hm(end)}", "PC on", short(end - start)]
+        lines = [f"{hm(start)} – {hm(end)}", title, short(end - start)]
         if not self.tip:
             self.tip = tk.Toplevel(self.root)
             self.tip.overrideredirect(True)
@@ -826,6 +867,10 @@ class App:
         self.sync_status.set("Connected. Syncing...")
         self.syncer.sync_now()
 
+    def sync_status_changed(self, text):
+        self.sync_status.set(text)
+        self.ticks = 0  # redraw the timeline soon, in case the sync brought phone or sleep data
+
     def sync_now(self):
         self.sync_status.set("Syncing...")
         self.syncer.sync_now()
@@ -835,6 +880,7 @@ class App:
                                               "there, and this PC stops sending."):
             sync.disconnect()
             self.show_sync_state()
+            self.ticks = 0  # the pulled phone and sleep data is gone; redraw the timeline soon
 
     def open_logs(self):
         os.makedirs(LOG_DIR, exist_ok=True)
