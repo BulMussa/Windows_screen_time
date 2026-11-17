@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "screentime"
-version = "1.0.0"
+version = "1.0.1"
 description = "Multi-monitor screen time tracker for Windows, with a taskbar clock and tray icon"
 readme = "README.md"
 license = {text = "MIT"}
