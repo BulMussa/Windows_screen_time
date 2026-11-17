@@ -17,6 +17,18 @@ Both reset at midnight: that day's log is saved and a new one starts. The log is
 
 Active and per-app time only count while you have given keyboard or mouse input within the last 60 seconds (`IDLE_LIMIT` in `screentime/tracker.py`). Locking the screen stops all counting right away.
 
+## Download and try it
+
+1. Download `ScreenTime.exe` from the [latest release](https://github.com/BulMussa/Windows_screen_time/releases). No installation or Python needed; it needs Windows 10 or 11, 64-bit.
+2. Run it. The exe isn't code-signed, so Windows may show **"Windows protected your PC"**: click **More info**, then **Run anyway**. Some antivirus tools also flag apps packaged this way (PyInstaller) by mistake.
+3. Your active time appears in the bottom-left corner of the taskbar, and a clock icon in the hidden icons menu (the ^ arrow next to the system clock). Click either one to open the window. See [Usage](#usage) for what it shows.
+
+Everything stays on your PC: the app sends nothing anywhere and keeps its data in `%LOCALAPPDATA%\ScreenTime\logs`.
+
+**To remove it:** untick **Start with Windows** in the Settings tab, right-click the tray icon and choose **Quit tracking**, then delete `ScreenTime.exe` and the `%LOCALAPPDATA%\ScreenTime` folder.
+
+**Found a bug or have an idea?** Open an [issue](https://github.com/BulMussa/Windows_screen_time/issues) and include your Windows version and what you did.
+
 ## Usage
 
 Requires Windows 10 or 11. `dist\ScreenTime.exe` runs without Python; running from source needs Python 3.9+ and nothing else.
@@ -61,7 +73,7 @@ screentime/            the Python package
   __main__.py          python -m screentime: starts the app
   app.py               window, taskbar clock, Start with Windows
   tray.py              tray icon (Win32 via ctypes)
-  icons.py             app icons for the Today tab, read from each .exe
+  icons.py             app icons for the Report tab, read from each .exe
   tracker.py           sampling, daily logs, console tracker
   report.py            per-day summary of the logs
   assets/              app icon
@@ -75,3 +87,7 @@ pyproject.toml         package metadata and commands
 
 - Apps are identified by process name, not by tab or document.
 - The cursor position is a proxy for attention, not a measure of it.
+
+## License
+
+[MIT](LICENSE)
