@@ -11,7 +11,7 @@
 ## Test every new feature with everything it needs
 
 - Test each feature for real, not only by reading the code:
-  - Import every module with warnings as errors: `python -W error -c "import screentime.app, screentime.tracker, screentime.report, screentime.tray, screentime.icons"`.
+  - Import every module with warnings as errors: `python -W error -c "import screentime.app, screentime.tracker, screentime.report, screentime.tray, screentime.icons, screentime.sync"`.
   - Run each affected entry point: `python -m screentime`, `python -m screentime.tracker`, `python -m screentime.report`.
   - Exercise the UI that changed: the window, the taskbar clock and the tray icon. Take screenshots when the look matters.
   - Rebuild `dist\ScreenTime.exe` and check that it starts.

@@ -19,7 +19,7 @@ import sys
 import threading
 import tkinter as tk
 import winreg
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from ctypes import wintypes
 from tkinter import font as tkfont, messagebox, ttk
 
@@ -27,7 +27,7 @@ from . import sync, tracker
 from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
                       Tracker, already_running, on_quit_request, quit_command, uptime_seconds, user32,
                       wait_until_stopped)
-from .icons import icon_png, large_icon_size, small_icon_size
+from .icons import _png, icon_png, large_icon_size, small_icon_size
 from .report import logged_days, read_log, read_logs, summarize
 from .timeline import day_spans, total
 from .tray import TrayIcon
@@ -193,6 +193,55 @@ def colored_button(parent, text, color, hover, command):
     button.bind("<Enter>", lambda e: button.config(bg=hover))
     button.bind("<Leave>", lambda e: button.config(bg=color))
     return button
+
+
+def cloud_png(size, color):
+    """A cloud icon, size x size pixels in color on a see-through background, as PNG bytes."""
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    bumps = ((0.29, 0.62, 0.19), (0.53, 0.47, 0.26), (0.75, 0.62, 0.19))  # (x, y, radius), 0-1 of the size
+    n = 4  # samples per pixel side, for smooth edges
+
+    def inside(x, y):
+        if y > 0.81:  # flat bottom
+            return False
+        return 0.29 <= x <= 0.75 and y >= 0.62 or any((x - cx) ** 2 + (y - cy) ** 2 <= cr * cr for cx, cy, cr in bumps)
+
+    rows = bytearray()
+    for py in range(size):
+        rows.append(0)  # PNG row filter: none
+        for px in range(size):
+            hits = sum(inside((px + (i + 0.5) / n) / size, (py + 0.08 * size + (j + 0.5) / n) / size)
+                       for i in range(n) for j in range(n))
+            rows += bytes((r, g, b, 255 * hits // (n * n)))
+    return _png(size, size, bytes(rows))
+
+
+class SyncButton:
+    """The Sync button, the same in every tab: a cloud and "Sync" when idle, then "Syncing…" and
+    "✓ Synced" or "Sync failed". Its size fits the longest of these, so the text changes inside it."""
+    TEXTS = {"idle": " Sync", "syncing": "Syncing…", "done": "✓ Synced", "failed": "Sync failed"}
+
+    def __init__(self, parent, app, command):
+        font = app.sync_font
+        if app.cloud is None:  # one image for every Sync button, sized to the text
+            app.cloud = tk.PhotoImage(data=cloud_png(font.metrics("linespace") - 2, "#374151"))
+        self.cloud = app.cloud
+        padx, pady = int(8 * app.scale), int(2 * app.scale)
+        width = max(font.measure(text) + (self.cloud.width() if state == "idle" else 0)
+                    for state, text in self.TEXTS.items()) + 2 * padx
+        height = font.metrics("linespace") + 2 * pady
+        self.frame = tk.Frame(parent, width=width, height=height, bg="#e5e7eb")
+        self.frame.pack_propagate(False)  # fixed size, whatever the text
+        self.button = tk.Button(self.frame, command=command, relief="flat", bd=0, bg="#e5e7eb",
+                                activebackground="#d1d5db", fg="#111", disabledforeground="#6b7280", font=font,
+                                padx=0, pady=0, cursor="hand2", compound="left")
+        self.button.pack(fill="both", expand=True)
+        self.show("idle")
+
+    def show(self, state):
+        busy = state == "syncing"
+        self.button.config(text=self.TEXTS[state], image=self.cloud if state == "idle" else "",
+                           state="disabled" if busy else "normal", cursor="" if busy else "hand2")
 
 
 def note(parent, text, **pack):
@@ -386,6 +435,8 @@ class App:
         style.configure("Rank.TLabel", font=("Segoe UI Semibold", 16), foreground="#888")
         self.app_name_font = tkfont.Font(family="Segoe UI Semibold", size=10)
         self.timeline_font = tkfont.Font(family="Segoe UI", size=8)
+        self.sync_font = tkfont.Font(family="Segoe UI", size=8)
+        self.cloud = None  # the Sync buttons' icon, made with the first one
         style.configure("AppName.TLabel", font=self.app_name_font)
         self.scale = root.winfo_fpixels("1i") / 96  # display scaling, for canvas sizes in pixels
         # Rows tall enough for the app icons
@@ -422,8 +473,15 @@ class App:
         self.report_day = None  # the day the Report shows; None follows today
         self.past_log = None  # that day's saved log when it isn't today (None: no data)
         self.date_picker = None
+        bg = style.lookup("TFrame", "background") or root.cget("bg")
+        arrow = lambda text, days: tk.Button(head, text=text, command=lambda: self.step_day(days), relief="flat", bd=0,
+                                             bg=bg, activebackground="#e5e7eb", fg="#374151",
+                                             disabledforeground="#d1d5db", font=("Segoe UI", 9), padx=4, cursor="hand2")
+        arrow("\u25c0", -1).pack(side="left", padx=(10, 2))  # the day before
         self.date_button = ttk.Button(head, command=self.toggle_date_picker)
-        self.date_button.pack(side="left", padx=(10, 0))
+        self.date_button.pack(side="left")
+        self.next_day = arrow("\u25b6", 1)  # the day after; light and inactive when that day hasn't come yet
+        self.next_day.pack(side="left", padx=(2, 0))
         self.timeline = tk.Canvas(report, height=int(124 * self.scale), highlightthickness=0,
                                   bg=style.lookup("TFrame", "background") or root.cget("bg"))
         self.timeline.pack(fill="x", pady=(6, 0))
@@ -432,6 +490,10 @@ class App:
         self.timeline.bind("<Enter>", self.hover_timeline)  # entering lands on a period without a <Motion>
         self.timeline.bind("<Leave>", lambda e: self.hover_timeline(None))
         self.periods = []  # (canvas item, start, end, title, color, hover color) of each period drawn
+        # Under the row names: sync without going to the Connect tab
+        self.sync_buttons = [SyncButton(self.timeline, self, self.sync_from_report)]
+        self.syncing = False  # a sync started from a Sync button, whose result they wait for
+        self.sync_reset = None  # pending switch of the buttons back to "Sync" after showing a result
         self.hover = None  # the last mouse event over the timeline, to keep the pop-up through redraws
         self.tip = None
         ttk.Separator(report).pack(fill="x", pady=10)
@@ -498,9 +560,9 @@ class App:
         note(settings, "Saves today's log and starts Screen Time again, e.g. if something looks stuck.", pady=(4, 8))
         ttk.Button(settings, text="Restart Screen Time", command=self.restart).pack(anchor="w")
 
-        # Sync tab: sends the logs to your own server
-        sync_tab = ttk.Frame(tabs, padding=12)
-        tabs.add(sync_tab, text="Sync")
+        # Connect tab: connects to your own server, which the logs are synced with
+        sync_tab = self.connect_tab = ttk.Frame(tabs, padding=12)
+        tabs.add(sync_tab, text="Connect")
         ttk.Label(sync_tab, text="Server sync", style="Heading.TLabel").pack(anchor="w")
         note(sync_tab, "Sends your PC-on, active and app times to your own server, so your other devices can "
                        "show them. The password is only used to register this PC and is never saved.",
@@ -532,7 +594,8 @@ class App:
         info.bind("<Configure>", lambda e: info.configure(wraplength=e.width))
         buttons = ttk.Frame(self.sync_connected)
         buttons.pack(anchor="w", pady=(8, 0))
-        ttk.Button(buttons, text="Sync now", command=self.sync_now).pack(side="left")
+        self.sync_buttons.append(SyncButton(buttons, self, self.start_sync))
+        self.sync_buttons[-1].frame.pack(side="left")
         ttk.Button(buttons, text="Disconnect", command=self.disconnect_sync).pack(side="left", padx=(8, 0))
         self.show_sync_state()
 
@@ -610,6 +673,13 @@ class App:
         else:
             self.date_picker = DatePicker(self, self.date_button, self.shown_day(), self.pick_day)
 
+    def step_day(self, days):
+        if self.date_picker:  # it would still show the old day
+            self.date_picker.close()
+        day = self.shown_day() + timedelta(days=days)
+        if day <= self.tracker.day:  # days that haven't come yet aren't shown
+            self.pick_day(day)
+
     def pick_day(self, day):
         self.report_day = None if day == self.tracker.day else day
         self.past_log = read_log(day) if self.report_day else None
@@ -651,6 +721,8 @@ class App:
         day = self.shown_day()
         log = self.shown_log(log) or {}
         self.date_button.config(text=f"{day:%d %b %Y}  ▾")
+        self.next_day.config(state="normal" if day < self.tracker.day else "disabled",
+                             cursor="hand2" if day < self.tracker.day else "")
         today = day == self.tracker.day
         # Past days without PC-on times (no log, or logged before they were recorded) and without
         # phone or sleep data from the server: no data
@@ -704,7 +776,7 @@ class App:
         phone, sleep = day_spans(remote, day, "phone_active"), day_spans(remote, day, "sleep")
         if on is None and not phone and not sleep:
             return None
-        hint = "" if sync.load_state()["server"] else "Not connected (Sync tab)"
+        hint = "" if sync.load_state()["server"] else "Not connected (Connect tab)"
         return [("Laptop", f"{short(log.get('active_seconds', 0))} active" if on is not None else "", "", laptop),
                 ("Phone", short(total(phone)) if phone else "", hint,
                  [("Phone · Active", TIMELINE_PHONE, TIMELINE_PHONE_HOVER, phone)]),
@@ -720,11 +792,13 @@ class App:
         width = c.winfo_width()
         if width < 50:  # not laid out yet
             return
+        left, right, top, row_h, pitch = int(78 * s), width - 1, 4 * s, 26 * s, 34 * s
+        bottom = top + 2 * pitch + row_h  # under the third row (Sleep), where the Sync button goes
+        c.create_window(2, bottom + 4 * s, window=self.sync_buttons[0].frame, anchor="nw")
         if rows is None:
             c.create_text(width / 2, c.winfo_height() / 2, text="No data", fill="#888", font=("Segoe UI", 10))
             self.hover_timeline(None)
             return
-        left, right, top, row_h, pitch = int(78 * s), width - 1, 4 * s, 26 * s, 34 * s
         bottom = top + (len(rows) - 1) * pitch + row_h
         x = lambda sec: left + (right - left) * sec / 86400
         bg = c.cget("bg")
@@ -864,16 +938,37 @@ class App:
             return
         self.sync_fields["password"].set("")
         self.show_sync_state()
+        self.start_sync()
         self.sync_status.set("Connected. Syncing...")
+
+    def sync_from_report(self):
+        """The Report tab's Sync button: sync now, or open the Connect tab when no server is connected."""
+        if not (sync.load_state()["server"] and sync.load_token()):
+            self.tabs.select(self.connect_tab)
+            return
+        self.start_sync()
+
+    def show_sync_buttons(self, state):
+        for button in self.sync_buttons:
+            button.show(state)
+
+    def start_sync(self):
+        """Sync now; every Sync button shows "Syncing…" until the result comes."""
+        if self.sync_reset:
+            self.root.after_cancel(self.sync_reset)
+            self.sync_reset = None
+        self.syncing = True
+        self.show_sync_buttons("syncing")
+        self.sync_status.set("Syncing...")
         self.syncer.sync_now()
 
     def sync_status_changed(self, text):
         self.sync_status.set(text)
+        if self.syncing:  # the Sync buttons are waiting for this
+            self.syncing = False
+            self.show_sync_buttons("done" if text.startswith("Synced") else "failed")
+            self.sync_reset = self.root.after(3000, lambda: self.show_sync_buttons("idle"))
         self.ticks = 0  # redraw the timeline soon, in case the sync brought phone or sleep data
-
-    def sync_now(self):
-        self.sync_status.set("Syncing...")
-        self.syncer.sync_now()
 
     def disconnect_sync(self):
         if messagebox.askyesno("Screen Time", "Disconnect from the server?\n\nWhat was already sent stays "
