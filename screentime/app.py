@@ -40,8 +40,7 @@ HISTORY_REFRESH = 60
 CLOCK_OFFSET = 12  # pixels from the left end of the taskbar
 RAISE_EVERY = 500  # ms; the taskbar covers the clock when clicked, so keep raising it
 TIMELINE_TRACK, TIMELINE_ON, TIMELINE_NOW = "#e5e7eb", "#2563eb", "#dc2626"
-TIMELINE_HOVER = "#1e3a8a"  # a laptop active period under the mouse
-TIMELINE_ON_LIGHT, TIMELINE_ON_LIGHT_HOVER = "#93c5fd", "#60a5fa"  # PC on, under the active periods
+TIMELINE_HOVER = "#1e3a8a"  # a laptop PC-on period under the mouse
 TIMELINE_PHONE, TIMELINE_PHONE_HOVER = "#f97316", "#c2410c"
 TIMELINE_SLEEP, TIMELINE_SLEEP_HOVER = "#7c3aed", "#5b21b6"
 ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "screentime.ico")
@@ -764,20 +763,13 @@ class App:
         parts are (title, color, hover color, spans) drawn in order; hint is for a row with no data.
         """
         on = log.get("on_timeline") if today or log.get("on_timeline") else None
-        active = log.get("active_timeline") or []
-        laptop = []
-        if on is not None:
-            if active:  # active periods drawn over the PC-on ones
-                laptop = [("Laptop · PC on", TIMELINE_ON_LIGHT, TIMELINE_ON_LIGHT_HOVER, on),
-                          ("Laptop · Active", TIMELINE_ON, TIMELINE_HOVER, active)]
-            else:  # days logged before active periods were recorded
-                laptop = [("Laptop · PC on", TIMELINE_ON, TIMELINE_HOVER, on)]
         remote = sync.load_remote()
         phone, sleep = day_spans(remote, day, "phone_active"), day_spans(remote, day, "sleep")
         if on is None and not phone and not sleep:
             return None
         hint = "" if sync.load_state()["server"] else "Not connected (Connect tab)"
-        return [("Laptop", f"{short(log.get('active_seconds', 0))} active" if on is not None else "", "", laptop),
+        return [("Laptop", f"{short(total(on))} on" if on is not None else "", "",
+                 [("Laptop · PC on", TIMELINE_ON, TIMELINE_HOVER, on or [])]),
                 ("Phone", short(total(phone)) if phone else "", hint,
                  [("Phone · Active", TIMELINE_PHONE, TIMELINE_PHONE_HOVER, phone)]),
                 ("Sleep", short(total(sleep)) if sleep else "", hint,
