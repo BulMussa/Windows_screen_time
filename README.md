@@ -39,11 +39,15 @@ Start `ScreenTime.exe`, or run `pythonw -m screentime` from the project folder. 
 
 It also adds an icon to the hidden icons menu (the ^ arrow next to the system clock). Hover over it to see today's times. To keep it always visible, drag it from that menu onto the taskbar.
 
-- **Click** the clock or the tray icon to open the window: today's active time and the PC's up time (since Windows last started, like Task Manager's Up time; restarts and shutdowns reset it), a **Report** tab for today or any earlier day (pick it from the calendar next to "Timeline", or step a day back or forward with the ◀ ▶ arrows beside it; bold days have data, and sections without data say "No data"; the **Sync** button (cloud icon) under the timeline syncs right away, or opens the Connect tab if no server is connected) with three 00:00-23:59 timelines: **Laptop** (blue: PC on, idle time included, with the PC-on total under the name; sleep, power-off and the lock screen left gray), **Phone** (orange) and **Sleep** (purple), where hovering over a period highlights it and shows its start, end and length. Phone and sleep come from your server, so they stay empty until another device sends them. The apps below count this PC only. the 3 most used apps, and every app's time with its icon (counted by active/focus/cursor, optionally split by monitor; the top 3 follow the same count), a **History** tab with one row per day, and a **Settings** tab (Start with Windows, showing or hiding the taskbar widget, logs folder, and **Restart Screen Time**, which saves and starts the app again without losing time).
+- **Click** the clock or the tray icon to open the window: today's active time and the PC's up time (since Windows last started, like Task Manager's Up time; restarts and shutdowns reset it), a **Report** tab for today or any earlier day (pick it from the calendar next to "Timeline", or step a day back or forward with the ◀ ▶ arrows beside it; bold days have data, and sections without data say "No data"; the **Sync** button (cloud icon) under the timeline syncs right away, or opens the Connect tab if the sync mode uses a server and none is connected) with three 00:00-23:59 timelines: **Laptop** (blue: PC on, idle time included, with the PC-on total under the name; sleep, power-off and the lock screen left gray), **Phone** (orange) and **Sleep** (purple), where hovering over a period highlights it and shows its start, end and length. Phone and sleep come from your server, so they stay empty until another device sends them. The apps below count this PC only. the 3 most used apps, and every app's time with its icon (counted by active/focus/cursor, optionally split by monitor; the top 3 follow the same count), a **History** tab with one row per day, and a **Settings** tab (Start with Windows, showing or hiding the taskbar widget, logs folder, and **Restart Screen Time**, which saves and starts the app again without losing time).
 - **Right-click** either one and choose **Quit tracking** to stop, or use the red **Quit tracking** button in the window. The green **Done** button (or closing the window) only hides it; tracking goes on.
 - From a terminal or script, `ScreenTime.exe --quit` (or `python -m screentime --quit`) makes the running copy save and exit, e.g. before rebuilding. Unlike **Quit tracking**, it counts as a restart: the time until the next start can still count as PC-on time.
 
-The **Connect** tab connects this PC to your own Screen Time server (HTTPS only; plain HTTP is accepted only for `localhost`). Enter the server address, your name and password, and a name for this PC. The password is used once to register the PC and is never saved; the device token goes into Windows Credential Manager, and the server address and what was already sent into `%LOCALAPPDATA%\ScreenTime\sync_state.json`. After that, changes to the PC-on and active periods and the per-app times are sent every 5 minutes (retried every minute while the server can't be reached), and only what changed. Each sync also pulls what other devices sent (phone and sleep periods), into `%LOCALAPPDATA%\ScreenTime\remote_intervals.json`, so the timelines work offline. Use **Sync** (the same button as in the Report tab) to sync right away, or **Disconnect** to stop (the device stays registered on the server). Keep this PC on the timezone set for your account, since days follow the PC's clock. Days logged before this version have PC-on periods but no active periods.
+The **Connect** tab connects this PC to your own Screen Time server (HTTPS only; plain HTTP is accepted only for `localhost`). Enter the server address, your name and password, and a name for this PC. The password is used once to register the PC and is never saved; the device token goes into Windows Credential Manager, and the server address, the sync mode and what was already sent into `%LOCALAPPDATA%\ScreenTime\sync_state.json`. After that, changes to the PC-on and active periods and the per-app times are sent every 5 minutes (retried every minute while the server can't be reached), and only what changed. Each sync also pulls what other devices sent (phone and sleep periods), into `%LOCALAPPDATA%\ScreenTime\remote_intervals.json`, so the timelines work offline. Use **Sync** (the same button as in the Report tab) to sync right away, or **Disconnect** to stop (the device stays registered on the server). Keep this PC on the timezone set for your account, since days follow the PC's clock. Days logged before this version have PC-on periods but no active periods.
+
+**Sync with** (also in the Connect tab) chooses how this PC syncs: **Server** (the default, as described above), **Phone directly** or **Both**. Syncing directly with the phone over your own network isn't built yet, so for now **Phone directly** syncs nothing and **Both** works like **Server**. Each way of syncing keeps its own record of what it already sent and where its last pull stopped, so switching never sends rows twice.
+
+**Export backup…** saves a JSON file with this PC's PC-on and active periods and app times (in the same format that is sent to the server) and the phone and sleep periods it has pulled, including the ones it saw deleted. **Import backup…** merges a backup in. Every row has an `updated_at`, and the newer copy wins, the same rule a sync uses. Rows the import loses don't change anything, and an old backup can't bring back a period that was deleted since. Phone and sleep periods are merged from any backup, also from a phone's. This PC's own periods and app times are only restored from a backup of this same install, i.e. with the same `sync_state.json`. They are restored into past days' logs whose file is older than the backup, or missing. Today's log is being written right now, so it is never overwritten. Restored days are checked again on the next sync.
 
 Tick **Start with Windows** in the Settings tab to launch it at login in the background. Untick **Show active time on the taskbar** to hide the widget in the taskbar's corner; the tray icon stays, and the choice is saved in `%LOCALAPPDATA%\ScreenTime\settings.json`.
 
@@ -77,15 +81,32 @@ screentime/            the Python package
   tray.py              tray icon (Win32 via ctypes)
   icons.py             app icons for the Report tab, read from each .exe
   tracker.py           sampling, daily logs, console tracker
-  sync.py              server sync: connect, device token, background push and pull
+  sync.py              sync: transports (server; direct is a placeholder), sync mode, device token,
+                       background push and pull, backup export and import
   timeline.py          phone and sleep spans of one day from the pulled data
   report.py            per-day summary of the logs
   assets/              app icon
 packaging/
   build.bat            builds dist\ScreenTime.exe with PyInstaller
   version_info.txt     name and version shown in Task Manager
+tests/                 test scripts (see Tests)
 pyproject.toml         package metadata and commands
 ```
+
+## Tests
+
+```bash
+python tests/run_all.py            # every tests/test_*.py, each in its own process, warnings as errors
+python tests/run_all.py backup     # only tests/test_backup.py
+```
+
+Each test points the app at a new temporary logs folder and a test Credential Manager entry (`ScreenTimeSyncTEST`), and talks to a fake server on `127.0.0.1`. Your real logs, sync state, device token and Start with Windows entry are never touched. `test_ui.py` and `test_pull.py` open the app's window for a few seconds. Stop the running app first (`ScreenTime.exe --quit`).
+
+- `test_sync.py`: connecting, pushing in batches, only sending changes, rejected rows, worker statuses
+- `test_pull.py`: pulling phone and sleep periods, paging, cursors, the Report timelines
+- `test_transports.py`: per-transport progress, migrating older state files, the sync mode, remembered deletions
+- `test_backup.py`: export/import round trip and the newest-wins merge
+- `test_ui.py`: the Connect tab: connecting, Sync, Disconnect, sync mode, backup buttons
 
 ## Limitations
 

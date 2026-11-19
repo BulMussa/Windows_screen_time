@@ -22,7 +22,7 @@ import tkinter as tk
 import winreg
 from datetime import date, datetime, timedelta
 from ctypes import wintypes
-from tkinter import font as tkfont, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from . import sync, tracker
 from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
@@ -586,10 +586,17 @@ class App:
         # Connect tab: connects to your own server, which the logs are synced with
         sync_tab = self.connect_tab = ttk.Frame(tabs, padding=12)
         tabs.add(sync_tab, text="Connect")
-        ttk.Label(sync_tab, text="Server sync", style="Heading.TLabel").pack(anchor="w")
-        note(sync_tab, "Sends your PC-on, active and app times to your own server, so your other devices can "
-                       "show them. The password is only used to register this PC and is never saved.",
-             pady=(4, 8))
+        choices = ttk.Frame(sync_tab)
+        choices.pack(fill="x")
+        ttk.Label(choices, text="Sync with", style="Heading.TLabel").pack(side="left", padx=(0, 14))
+        self.sync_mode = tk.StringVar(value=sync.get_mode())
+        self.mode_buttons = [ttk.Radiobutton(choices, text=label, value=value, variable=self.sync_mode,
+                                             command=self.change_sync_mode)
+                             for value, label in (("server", "Server"), ("direct", "Phone directly"), ("both", "Both"))]
+        for button in self.mode_buttons:  # choosing direct sync shows in the status below that it isn't built yet
+            button.pack(side="left", padx=(0, 12))
+        ttk.Separator(sync_tab).pack(fill="x", pady=10)
+        ttk.Label(sync_tab, text="Server sync", style="Heading.TLabel").pack(anchor="w", pady=(0, 4))
         self.sync_status = tk.StringVar()
         status = ttk.Label(sync_tab, textvariable=self.sync_status, style="Caption.TLabel")
         status.pack(fill="x")
@@ -606,10 +613,10 @@ class App:
         self.sync_form.columnconfigure(1, weight=1)
         self.sync_error = tk.StringVar()
         error = ttk.Label(self.sync_form, textvariable=self.sync_error, foreground="#dc2626")
-        error.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        error.grid(row=4, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))  # beside the button, to save room
         error.bind("<Configure>", lambda e: error.configure(wraplength=e.width))
         self.connect_button = ttk.Button(self.sync_form, text="Connect", command=self.connect_sync)
-        self.connect_button.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.connect_button.grid(row=4, column=0, sticky="nw", pady=(8, 0))
         self.sync_connected = ttk.Frame(sync_tab)
         self.sync_info = tk.StringVar()
         info = ttk.Label(self.sync_connected, textvariable=self.sync_info)
@@ -621,6 +628,23 @@ class App:
         self.sync_buttons[-1].frame.pack(side="left")
         ttk.Button(buttons, text="Disconnect", command=self.disconnect_sync).pack(side="left", padx=(8, 0))
         self.show_sync_state()
+        # Packed from the bottom, so they stay put while the form above changes to the connected panel
+        backup = ttk.Frame(sync_tab)
+        backup.pack(side="bottom", fill="x")
+        ttk.Separator(sync_tab).pack(side="bottom", fill="x", pady=(8, 10))
+        ttk.Label(backup, text="Backup", style="Heading.TLabel").pack(anchor="w")
+        note(backup, "This PC's times and the pulled phone and sleep periods, as a JSON file. Importing one "
+                     "merges it: the newer copy of each period wins.", pady=(2, 6))
+        row = ttk.Frame(backup)
+        row.pack(fill="x")
+        self.backup_buttons = [ttk.Button(row, text="Export backup…", command=self.export_backup),
+                               ttk.Button(row, text="Import backup…", command=self.import_backup)]
+        self.backup_buttons[0].pack(side="left", anchor="n")
+        self.backup_buttons[1].pack(side="left", anchor="n", padx=(8, 0))
+        self.backup_status = tk.StringVar()
+        status = ttk.Label(row, textvariable=self.backup_status, style="Caption.TLabel")
+        status.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        status.bind("<Configure>", lambda e: status.configure(wraplength=e.width))
 
         # Footer
         foot = ttk.Frame(root, padding=(16, 0, 16, 12))
@@ -994,8 +1018,10 @@ class App:
         self.sync_status.set("Connected. Syncing...")
 
     def sync_from_report(self):
-        """The Report tab's Sync button: sync now, or open the Connect tab when no server is connected."""
-        if not (sync.load_state()["server"] and sync.load_token()):
+        """The Report tab's Sync button: sync now, or open the Connect tab when the sync mode needs a
+        server and none is connected."""
+        state = sync.load_state()
+        if sync.uses_server(state["mode"]) and not (state["server"] and sync.load_token()):
             self.tabs.select(self.connect_tab)
             return
         self.start_sync()
@@ -1028,6 +1054,69 @@ class App:
             sync.disconnect()
             self.show_sync_state()
             self.ticks = 0  # the pulled phone and sleep data is gone; redraw the timeline soon
+
+    def change_sync_mode(self):
+        """Save the chosen sync mode and sync with it right away."""
+        mode = self.sync_mode.get()
+
+        def work():  # off the Tk thread: it waits for a sync that is running
+            try:
+                sync.set_mode(mode)
+            except OSError as e:
+                self.calls.put(lambda: messagebox.showerror("Screen Time", f"Couldn't save the sync mode:\n{e}"))
+                return
+            self.calls.put(self.start_sync)
+        threading.Thread(target=work, daemon=True).start()
+
+    def run_backup(self, start_text, work, done):
+        """Run a backup export or import off the Tk thread (it waits for a running sync), then done(result)."""
+        for button in self.backup_buttons:
+            button.state(["disabled"])
+        self.backup_status.set(start_text)
+
+        def run():
+            try:
+                result, error = work(), None
+            except (sync.BackupError, OSError) as e:
+                result, error = None, str(e)
+            self.calls.put(lambda: finish(result, error))
+
+        def finish(result, error):
+            for button in self.backup_buttons:
+                button.state(["!disabled"])
+            if error:
+                self.backup_status.set("")
+                messagebox.showerror("Screen Time", error)
+            else:
+                self.backup_status.set(done(result))
+        threading.Thread(target=run, daemon=True).start()
+
+    def export_backup(self):
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Export backup", defaultextension=".json",
+            initialfile=f"screentime-backup-{date.today().isoformat()}.json",
+            filetypes=[("Screen Time backup", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        day, log = self.tracker.day, self.tracker.snapshot()
+        self.run_backup("Exporting...", lambda: sync.export_backup(path, day, log),
+                        lambda r: f"Saved {r[0] + r[1]} rows to {os.path.basename(path)}.")  # short: it fits beside the buttons
+
+    def import_backup(self):
+        path = filedialog.askopenfilename(parent=self.root, title="Import backup",
+                                          filetypes=[("Screen Time backup", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+
+        def done(result):
+            self.ticks = 0  # redraw the timeline and tables soon with what came in
+            if result["skipped"]:  # unusual enough to say out loud
+                messagebox.showwarning("Screen Time", f"{result['skipped']} rows of the backup look like this PC's "
+                                                      "but don't match it, so they were skipped.")
+            days = len(result["days"])
+            return f"Imported: {result['changed']} phone/sleep periods, {days} {'day' if days == 1 else 'days'} " \
+                   f"of this PC."  # short: it fits beside the buttons
+        self.run_backup("Importing...", lambda: sync.import_backup(path, self.tracker.day), done)
 
     def open_logs(self):
         os.makedirs(LOG_DIR, exist_ok=True)
