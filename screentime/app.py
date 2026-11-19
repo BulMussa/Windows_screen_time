@@ -12,6 +12,7 @@ import base64
 import calendar
 import ctypes
 import json
+import math
 import os
 import queue
 import subprocess
@@ -39,7 +40,7 @@ TABLE_REFRESH = 5  # seconds between refreshes of the app tables
 HISTORY_REFRESH = 60
 CLOCK_OFFSET = 12  # pixels from the left end of the taskbar
 RAISE_EVERY = 500  # ms; the taskbar covers the clock when clicked, so keep raising it
-TIMELINE_TRACK, TIMELINE_ON, TIMELINE_NOW = "#e5e7eb", "#2563eb", "#dc2626"
+TIMELINE_TRACK, TIMELINE_ON, TIMELINE_NOW = "#e5e7eb", "#2563eb", "#4b5563"
 TIMELINE_HOVER = "#1e3a8a"  # a laptop PC-on period under the mouse
 TIMELINE_PHONE, TIMELINE_PHONE_HOVER = "#f97316", "#c2410c"
 TIMELINE_SLEEP, TIMELINE_SLEEP_HOVER = "#7c3aed", "#5b21b6"
@@ -182,6 +183,28 @@ def fit(text, font, width):
     while text and font.measure(text + "…") > width:
         text = text[:-1]
     return text + "…"
+
+
+def pill_edges(px, y1, y2, left, right):
+    """Top and bottom y at px of a bar from left to right with fully round ends (radius = half its height)."""
+    r = (y2 - y1) / 2
+    d = max(left + r - px, px - (right - r), 0)  # how far px is into a round end
+    dy = r - math.sqrt(max(r * r - d * d, 0))
+    return y1 + dy, y2 - dy
+
+
+def pill_points(xa, xb, y1, y2, left, right):
+    """Polygon points of the part xa..xb of that round-ended bar: square in the middle, curved at the ends."""
+    xa, xb = max(xa, left), min(xb, right)
+    r = (y2 - y1) / 2
+    ends = [*range(math.ceil(left), math.floor(left + r) + 1), *range(math.ceil(right - r), math.floor(right) + 1)]
+    xs = [xa, *(px for px in ends if xa < px < xb), xb]  # a point every pixel along the curves traces them exactly
+    tops, bottoms = [], []
+    for px in xs:
+        ya, yb = pill_edges(px, y1, y2, left, right)
+        tops += [px, ya]
+        bottoms += [px, yb]
+    return tops + [v for i in range(len(bottoms) - 2, -1, -2) for v in bottoms[i:i + 2]]
 
 
 def colored_button(parent, text, color, hover, command):
@@ -434,6 +457,7 @@ class App:
         style.configure("Rank.TLabel", font=("Segoe UI Semibold", 16), foreground="#888")
         self.app_name_font = tkfont.Font(family="Segoe UI Semibold", size=10)
         self.timeline_font = tkfont.Font(family="Segoe UI", size=8)
+        self.now_font = tkfont.Font(family="Segoe UI", size=9)  # the now-line's time, a bit bigger than the hours
         self.sync_font = tkfont.Font(family="Segoe UI", size=8)
         self.cloud = None  # the Sync buttons' icon, made with the first one
         style.configure("AppName.TLabel", font=self.app_name_font)
@@ -481,7 +505,7 @@ class App:
         self.date_button.pack(side="left")
         self.next_day = arrow("\u25b6", 1)  # the day after; light and inactive when that day hasn't come yet
         self.next_day.pack(side="left", padx=(2, 0))
-        self.timeline = tk.Canvas(report, height=int(124 * self.scale), highlightthickness=0,
+        self.timeline = tk.Canvas(report, height=int(140 * self.scale), highlightthickness=0,
                                   bg=style.lookup("TFrame", "background") or root.cget("bg"))
         self.timeline.pack(fill="x", pady=(6, 0))
         self.timeline.bind("<Configure>", lambda e: self.refresh_report())
@@ -784,7 +808,7 @@ class App:
         width = c.winfo_width()
         if width < 50:  # not laid out yet
             return
-        left, right, top, row_h, pitch = int(78 * s), width - 1, 4 * s, 26 * s, 34 * s
+        left, right, top, row_h, pitch = int(78 * s), width - 1, 20 * s, 26 * s, 34 * s  # room on top for the now-line's time
         bottom = top + 2 * pitch + row_h  # under the third row (Sleep), where the Sync button goes
         c.create_window(2, bottom + 4 * s, window=self.sync_buttons[0].frame, anchor="nw")
         if rows is None:
@@ -800,12 +824,15 @@ class App:
             mid = (y1 + y2) / 2
             c.create_text(2, mid, text=name, anchor="sw", fill="#111", font=self.app_name_font)
             c.create_text(2, mid + 1, text=summary, anchor="nw", fill="#666", font=self.timeline_font)
-            c.create_rectangle(left, y1, right, y2, fill=TIMELINE_TRACK, outline="")
+            c.create_polygon(pill_points(left, right, y1, y2, left, right), fill=TIMELINE_TRACK, outline="")
             for h in range(1, 24):  # thin gaps divide the gray bar into hours; the colored spans cover them
-                c.create_line(x(h * 3600), y1, x(h * 3600), y2, fill=bg)
+                xh = x(h * 3600)
+                ya, yb = pill_edges(xh, y1, y2, left, right)
+                c.create_line(xh, ya, xh, yb, fill=bg)
             for title, color, hover, spans in parts:
                 for start, end in spans:
-                    item = c.create_rectangle(x(start), y1, max(x(end), x(start) + 1), y2, fill=color, outline="")
+                    points = pill_points(x(start), max(x(end), x(start) + 1), y1, y2, left, right)
+                    item = c.create_polygon(points, fill=color, outline="")
                     self.periods.append((item, start, end, title, color, hover))
             if hint and not any(spans for *_, spans in parts):
                 c.create_text((left + right) / 2, mid, text=hint, fill="#888", font=self.timeline_font)
@@ -821,8 +848,41 @@ class App:
         if today:
             now = datetime.now()
             xn = x(now.hour * 3600 + now.minute * 60 + now.second)
-            c.create_line(xn, top - 3 * s, xn, bottom + 3 * s, fill=TIMELINE_NOW, width=max(2, int(2 * s)))
+            w = max(3, round(3 * s))  # any thinner and the round ends can't show
+            ya, yb = round(top - 3 * s), round(bottom + 3 * s)
+            c.create_image(round(xn - w / 2), ya, image=self.now_line_image(w, yb - ya, bg), anchor="nw")
+            # The time on top of the line, centered on it but kept inside the canvas near the edges
+            label = now.strftime("%H:%M")
+            half = self.now_font.measure(label) / 2
+            xl = min(max(xn, half + 1), width - half - 1)
+            c.create_text(xl, top - 3 * s, text=label, anchor="s", fill="#111", font=self.now_font)
         self.hover_timeline(self.hover)  # a redraw keeps the period under the mouse highlighted
+
+    def now_line_image(self, w, length, bg):
+        """The now-line as a w x length image with fully round ends. Tk draws round line caps this thin as
+        squares, so the ends are drawn here, their edge pixels blended into bg (the ends sit off the bars)."""
+        key = (w, length, bg)
+        if getattr(self, "now_line", (None,))[0] != key:
+            line = [int(TIMELINE_NOW[i:i + 2], 16) for i in (1, 3, 5)]
+            back = [v >> 8 for v in self.timeline.winfo_rgb(bg)]
+            r, n = w / 2, 4  # radius, and n x n samples per pixel for the coverage
+            rows = []
+            for py in range(length):
+                row = []
+                for px in range(w):
+                    hits = 0
+                    for i in range(n):
+                        for j in range(n):
+                            sx, sy = px + (i + .5) / n, py + (j + .5) / n
+                            cy = min(max(sy, r), length - r)  # nearest point on the line's middle
+                            hits += (sx - r) ** 2 + (sy - cy) ** 2 <= r * r
+                    k = hits / (n * n)
+                    row.append("#%02x%02x%02x" % tuple(round(a * k + b * (1 - k)) for a, b in zip(line, back)))
+                rows.append("{" + " ".join(row) + "}")
+            image = tk.PhotoImage(width=w, height=length)
+            image.put(" ".join(rows))
+            self.now_line = (key, image)  # kept, or Tk drops the image
+        return self.now_line[1]
 
     def hover_timeline(self, event):
         """Highlight the period under the mouse and show its times in a pop-up."""
@@ -832,7 +892,7 @@ class App:
         if event is not None:
             slack = 2 * self.scale  # thin periods are hard to hit exactly
             for period in reversed(self.periods):  # the last one drawn is on top
-                x1, y1, x2, y2 = c.coords(period[0])
+                x1, y1, x2, y2 = c.bbox(period[0])
                 if x1 - slack <= event.x <= x2 + slack and y1 - slack <= event.y <= y2 + slack:
                     found = period
                     break
