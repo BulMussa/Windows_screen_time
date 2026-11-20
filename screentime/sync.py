@@ -92,23 +92,23 @@ class BackupError(Exception):
     """A backup file that can't be read or imported; the message says why."""
 
 
-# --- Device token in Credential Manager ---
+# --- Secrets in Credential Manager (the server's device token; peer.py keeps the phone's there too) ---
 
-def save_token(token):
-    blob = token.encode()
+def cred_write(target, text):
+    blob = text.encode()
     buf = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
     cred = CREDENTIAL()
-    cred.Type, cred.TargetName, cred.UserName = CRED_TYPE_GENERIC, CRED_TARGET, "ScreenTime"
+    cred.Type, cred.TargetName, cred.UserName = CRED_TYPE_GENERIC, target, "ScreenTime"
     cred.CredentialBlobSize, cred.CredentialBlob = len(blob), ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte))
     cred.Persist = CRED_PERSIST_LOCAL_MACHINE
     if not advapi32.CredWriteW(ctypes.byref(cred), 0):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def load_token():
-    """The saved device token, or None."""
+def cred_read(target):
+    """The text saved under target, or None."""
     ptr = ctypes.POINTER(CREDENTIAL)()
-    if not advapi32.CredReadW(CRED_TARGET, CRED_TYPE_GENERIC, 0, ctypes.byref(ptr)):
+    if not advapi32.CredReadW(target, CRED_TYPE_GENERIC, 0, ctypes.byref(ptr)):
         return None
     try:
         cred = ptr.contents
@@ -117,8 +117,21 @@ def load_token():
         advapi32.CredFree(ctypes.cast(ptr, wintypes.LPVOID))
 
 
+def cred_delete(target):
+    advapi32.CredDeleteW(target, CRED_TYPE_GENERIC, 0)  # fails harmlessly if there is none
+
+
+def save_token(token):
+    cred_write(CRED_TARGET, token)
+
+
+def load_token():
+    """The saved device token, or None."""
+    return cred_read(CRED_TARGET)
+
+
 def delete_token():
-    advapi32.CredDeleteW(CRED_TARGET, CRED_TYPE_GENERIC, 0)  # fails harmlessly if there is none
+    cred_delete(CRED_TARGET)
 
 
 # --- State file ---
@@ -159,8 +172,39 @@ def load_state():
     if state["mode"] not in MODES:
         state["mode"] = DEFAULT_MODE
     if not state["install_id"]:
-        state["install_id"] = str(uuid.uuid4())
+        state["install_id"] = new_install_id()
     return state
+
+
+_install_lock = threading.Lock()  # not _lock: load_state also runs while a sync holds that
+
+
+def new_install_id():
+    """Make this install's ID and save it at once, so it stays the same even if nothing else is ever
+    saved (e.g. a PC that only syncs with the phone directly, or only makes backups)."""
+    with _install_lock:
+        try:
+            with open(state_path()) as f:
+                saved = json.load(f).get("install_id")
+            if saved:
+                return saved  # another thread just made it
+        except (OSError, ValueError, AttributeError):
+            saved = None
+        install_id = str(uuid.uuid4())
+        try:
+            path = state_path()
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            except (OSError, ValueError):
+                data = {}
+            data["install_id"] = install_id
+            save_state(data)
+        except OSError:
+            pass  # read-only folder: it will be made again next time, as before
+        return install_id
 
 
 def save_state(state):

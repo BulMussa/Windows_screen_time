@@ -1,4 +1,4 @@
-"""Screen time tracker with a small window (Windows, stdlib only).
+"""Screen time tracker with a small window (Windows; stdlib, plus cryptography and segno for phone pairing).
 
 Tracks in the background exactly like screentime.tracker and shows today's active
 time ("Active 3h 12m") in the bottom-left corner of the taskbar, plus an icon in the
@@ -24,7 +24,9 @@ from datetime import date, datetime, timedelta
 from ctypes import wintypes
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
-from . import sync, tracker
+import segno
+
+from . import firewall, peer, sync, tracker
 from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, TICK,
                       Tracker, already_running, on_quit_request, quit_command, uptime_seconds, user32,
                       wait_until_stopped)
@@ -205,6 +207,23 @@ def pill_points(xa, xb, y1, y2, left, right):
         tops += [px, ya]
         bottoms += [px, yb]
     return tops + [v for i in range(len(bottoms) - 2, -1, -2) for v in bottoms[i:i + 2]]
+
+
+def last_synced_text(stamp, now=None):
+    """"Phone last synced at 12:39." from peer.json's last_sync (local time, ISO); yesterday and older days say so."""
+    if not stamp:
+        return "The phone hasn't synced yet."
+    try:
+        when = datetime.fromisoformat(stamp)
+    except ValueError:
+        return "The phone hasn't synced yet."
+    today = (now or datetime.now()).date()
+    clock = when.strftime("%H:%M")
+    if when.date() == today:
+        return f"Phone last synced at {clock}."
+    if when.date() == today - timedelta(days=1):
+        return f"Phone last synced yesterday at {clock}."
+    return f"Phone last synced on {when.day} {when:%b} at {clock}."
 
 
 def colored_button(parent, text, color, hover, command):
@@ -435,6 +454,61 @@ class DatePicker:
         self.win.destroy()
 
 
+def qr_image(text, size):
+    """A QR code of text as a Tk image about size pixels wide (segno makes the code; Tk draws it)."""
+    code = segno.make(text, error="m", micro=False)
+    border = 4  # the quiet zone scanners need
+    rows = [[0] * border + list(row) + [0] * border for row in code.matrix]
+    width = len(rows[0])
+    rows = [[0] * width] * border + rows + [[0] * width] * border
+    image = tk.PhotoImage(width=width, height=width)
+    image.put(" ".join("{" + " ".join("#000000" if dark else "#ffffff" for dark in row) + "}" for row in rows))
+    return image.zoom(max(2, size // width))
+
+
+class PairDialog(tk.Toplevel):
+    """The pairing QR code: this PC's name, address, port, one-time secret and certificate fingerprint."""
+
+    def __init__(self, app, payload):
+        super().__init__(app.root)
+        self.app, self.done = app, False
+        self.phone_before = peer.paired_phone()
+        self.title("Pair a phone")
+        self.resizable(False, False)
+        self.transient(app.root)
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Scan this with Screen Time on your phone", style="Heading.TLabel").pack(anchor="w")
+        ttk.Label(frame, text=f"The phone must be on the same network. The code works once, for "
+                              f"{peer.PAIRING_TTL // 60} minutes. Pairing replaces any phone paired before.",
+                  style="Caption.TLabel", wraplength=int(300 * app.scale)).pack(anchor="w", pady=(4, 10))
+        self.image = qr_image(json.dumps(payload, separators=(",", ":")), int(300 * app.scale))
+        self.qr = ttk.Label(frame, image=self.image)
+        self.qr.pack()
+        fp = payload["cert_sha256"].upper()
+        ttk.Label(frame, text=f"{payload['name']} · {', '.join(payload['addresses'])}:{payload['port']}\n"
+                              f"Certificate {':'.join(fp[i:i + 2] for i in range(0, 16, 2))}…",
+                  style="Caption.TLabel", justify="center").pack(pady=(10, 0))
+        self.status = tk.StringVar(value="Waiting for the phone...")
+        ttk.Label(frame, textvariable=self.status).pack(pady=(8, 0))
+        self.close_button = ttk.Button(frame, text="Cancel", command=self.close)
+        self.close_button.pack(pady=(10, 0))
+        self.expiry = self.after(peer.PAIRING_TTL * 1000, self.expired)
+        self.geometry(f"+{app.root.winfo_rootx() + 40}+{app.root.winfo_rooty() + 40}")
+        self.focus_set()
+
+    def expired(self):
+        if not self.done:
+            self.status.set("This code has expired. Close this window and pair again.")
+            self.qr.configure(image="")
+
+    def close(self):
+        self.after_cancel(self.expiry)
+        self.destroy()
+        self.app.pairing_closed()
+
+
 class App:
     def __init__(self, root, tracker):
         self.root = root
@@ -452,6 +526,7 @@ class App:
         style = ttk.Style()
         style.configure("Value.TLabel", font=("Segoe UI Semibold", 22))
         style.configure("Caption.TLabel", font=("Segoe UI", 9), foreground="#666")
+        style.configure("Warning.TLabel", font=("Segoe UI", 9), foreground="#b45309")  # amber: something to fix
         style.configure("NoData.TLabel", font=("Segoe UI", 10), foreground="#888")
         style.configure("Heading.TLabel", font=("Segoe UI Semibold", 10))
         style.configure("Rank.TLabel", font=("Segoe UI Semibold", 16), foreground="#888")
@@ -595,6 +670,34 @@ class App:
                              for value, label in (("server", "Server"), ("direct", "Phone directly"), ("both", "Both"))]
         for button in self.mode_buttons:  # choosing direct sync shows in the status below that it isn't built yet
             button.pack(side="left", padx=(0, 12))
+        phone = ttk.Frame(sync_tab)
+        phone.pack(fill="x", pady=(6, 0))
+        self.allow_phone = tk.BooleanVar(value=peer.load_config()["enabled"])
+        self.allow_phone_button = ttk.Checkbutton(phone, text="Allow phone sync", variable=self.allow_phone,
+                                                  command=self.toggle_phone_sync)
+        self.allow_phone_button.pack(side="left")
+        self.phone_status = tk.StringVar(value="Off")
+        phone_status = ttk.Label(phone, textvariable=self.phone_status, style="Caption.TLabel")
+        phone_status.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        phone_status.bind("<Configure>", lambda e: phone_status.configure(wraplength=e.width))
+        # Windows Firewall blocking the listener, checked whenever it starts listening (empty when it's fine)
+        self.firewall_text = tk.StringVar()
+        self.firewall_check = None  # the check whose answer is still wanted
+        firewall_label = ttk.Label(sync_tab, textvariable=self.firewall_text, style="Warning.TLabel")
+        firewall_label.pack(fill="x", pady=(4, 0))
+        firewall_label.bind("<Configure>", lambda e: firewall_label.configure(wraplength=e.width))
+        pairing = ttk.Frame(sync_tab)
+        pairing.pack(fill="x", pady=(6, 0))
+        self.pair_button = ttk.Button(pairing, text="Pair a phone…", command=self.pair_phone)
+        self.pair_button.pack(side="left")
+        self.unpair_button = ttk.Button(pairing, text="Remove pairing", command=self.remove_pairing)
+        self.unpair_button.pack(side="left", padx=(8, 0))
+        self.paired_text = tk.StringVar()
+        paired = ttk.Label(pairing, textvariable=self.paired_text, style="Caption.TLabel")
+        paired.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        paired.bind("<Configure>", lambda e: paired.configure(wraplength=e.width))
+        self.pair_dialog = None
+        self.show_pairing()
         ttk.Separator(sync_tab).pack(fill="x", pady=10)
         ttk.Label(sync_tab, text="Server sync", style="Heading.TLabel").pack(anchor="w", pady=(0, 4))
         self.sync_status = tk.StringVar()
@@ -662,6 +765,15 @@ class App:
         ])
         self.syncer = sync.SyncWorker(tracker, lambda text: self.calls.put(lambda: self.sync_status_changed(text)))
         self.syncer.start()
+        # The phone connects to this PC while "Allow phone sync" is on
+        self.peer = peer.PeerListener(
+            lambda: (self.tracker.day, self.tracker.snapshot()),
+            on_status=lambda text: self.calls.put(lambda: self.phone_status_changed(text)),
+            on_change=lambda: self.calls.put(self.phone_pushed),
+            on_paired=lambda: self.calls.put(self.show_pairing),
+            on_synced=lambda: self.calls.put(self.show_pairing))
+        if self.allow_phone.get():
+            self.peer.start()
         threading.Thread(target=self.track, daemon=True).start()
         self.refresh()
         self.run_calls()
@@ -1068,6 +1180,106 @@ class App:
             self.calls.put(self.start_sync)
         threading.Thread(target=work, daemon=True).start()
 
+    def toggle_phone_sync(self):
+        """Save "Allow phone sync" and start or stop the listener, off the Tk thread (stopping waits
+        for it, and the first start makes the certificate)."""
+        enabled = self.allow_phone.get()
+        self.allow_phone_button.state(["disabled"])
+        self.phone_status.set("Starting..." if enabled else "Stopping...")
+
+        def work():
+            try:
+                peer.set_enabled(enabled)
+                if enabled:
+                    self.peer.start()
+                else:
+                    self.peer.stop()
+                    self.calls.put(lambda: self.phone_status.set("Off"))
+            except OSError as e:
+                self.calls.put(lambda: (self.allow_phone.set(not enabled), self.phone_status.set(
+                    f"Couldn't save the setting: {e}")))
+            self.calls.put(lambda: self.allow_phone_button.state(["!disabled"]))
+        threading.Thread(target=work, daemon=True).start()
+
+    def phone_status_changed(self, text):
+        """The listener's state; once it listens, check in the background whether Windows Firewall lets the phone in."""
+        self.phone_status.set(text)
+        address, responder = self.peer.address, self.peer.responder
+        if not (text.startswith("Listening on") and address):
+            self.firewall_check = None
+            self.firewall_text.set("")
+            return
+        token = self.firewall_check = object()
+        discovery = responder.address[1] if responder else peer.DISCOVERY_PORT
+
+        def work():  # PowerShell takes a few seconds
+            verdict, message = firewall.check(address[0], address[1], discovery)
+            self.calls.put(lambda: self.firewall_text.set(message) if self.firewall_check is token else None)
+        threading.Thread(target=work, daemon=True).start()
+
+    def phone_pushed(self):
+        self.ticks = 0  # the phone sent periods: redraw the timeline soon
+
+    def show_pairing(self):
+        """The paired phone under "Allow phone sync", and in the pairing window once the phone paired."""
+        phone = peer.paired_phone()
+        self.paired_text.set(f"Paired with {phone['name']}. {last_synced_text(phone.get('last_sync'))}"
+                             if phone else "No phone paired")
+        self.unpair_button.state(["!disabled"] if phone else ["disabled"])
+        dialog = self.pair_dialog
+        if dialog and phone and phone != dialog.phone_before and not dialog.done:
+            dialog.done = True
+            dialog.status.set(f"Paired with {phone['name']}. You can close this window.")
+            dialog.qr.configure(image="")  # the code is spent; don't leave it on screen
+            dialog.close_button.configure(text="Done")
+
+    def pair_phone(self):
+        """Allow phone sync if it's off, open a pairing and show its QR code."""
+        if self.pair_dialog:
+            self.pair_dialog.lift()
+            return
+        self.pair_button.state(["disabled"])
+        if not self.allow_phone.get():
+            self.allow_phone.set(True)
+            self.phone_status.set("Starting...")
+
+        def work():  # off the Tk thread: starting the listener can take a moment the first time
+            error, payload = None, None
+            try:
+                peer.set_enabled(True)
+                self.peer.start()
+                self.peer.ready.wait(10)
+                address = self.peer.address
+                if not address:
+                    error = "This PC isn't on a private network right now, so the phone can't reach it."
+                else:
+                    payload = peer.start_pairing([address[0]], address[1])
+            except OSError as e:
+                error = f"Couldn't start pairing:\n{e}"
+            self.calls.put(lambda: self.pairing_ready(payload, error))
+        threading.Thread(target=work, daemon=True).start()
+
+    def pairing_ready(self, payload, error):
+        self.pair_button.state(["!disabled"])
+        if error:
+            messagebox.showerror("Screen Time", error)
+            return
+        self.pair_dialog = PairDialog(self, payload)
+
+    def pairing_closed(self):
+        dialog, self.pair_dialog = self.pair_dialog, None
+        if dialog and not dialog.done:
+            threading.Thread(target=peer.cancel_pairing, daemon=True).start()  # the code stops working
+        self.show_pairing()
+
+    def remove_pairing(self):
+        phone = peer.paired_phone()
+        if phone and messagebox.askyesno(
+                "Screen Time", f"Remove the pairing with {phone['name']}?\n\nIt can't sync with this PC "
+                               "until you pair it again."):
+            peer.remove_pairing()
+            self.show_pairing()
+
     def run_backup(self, start_text, work, done):
         """Run a backup export or import off the Tk thread (it waits for a running sync), then done(result)."""
         for button in self.backup_buttons:
@@ -1141,6 +1353,7 @@ class App:
         """stopped=False (from --quit) saves without the deliberate-quit mark, like a restart."""
         self.stop.set()
         self.syncer.close()
+        self.peer.stop()
         self.tracker.save(stopped=stopped)
         self.tray.remove()
         self.root.destroy()
