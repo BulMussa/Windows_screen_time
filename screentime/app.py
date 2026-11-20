@@ -668,7 +668,7 @@ class App:
         self.mode_buttons = [ttk.Radiobutton(choices, text=label, value=value, variable=self.sync_mode,
                                              command=self.change_sync_mode)
                              for value, label in (("server", "Server"), ("direct", "Phone directly"), ("both", "Both"))]
-        for button in self.mode_buttons:  # choosing direct sync shows in the status below that it isn't built yet
+        for button in self.mode_buttons:  # Phone directly turns server sync off; the status below says so
             button.pack(side="left", padx=(0, 12))
         phone = ttk.Frame(sync_tab)
         phone.pack(fill="x", pady=(6, 0))

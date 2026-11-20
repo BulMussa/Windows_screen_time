@@ -438,10 +438,13 @@ def apply_push(pushed):
             elif row["kind"] not in PHONE_KINDS:
                 part["rejected"].append({"id": row["id"], "reason": "kind_not_allowed"})
             else:
-                old = remote["intervals"].get(row["id"]) or remote["deleted"].get(row["id"])
-                newer = not old or old[3] < updated
-                sync.apply_pulled(remote, row)
-                part["accepted" if newer else "ignored"] += 1
+                # The same rule and the same store as rows pulled from the server, with the route recorded, so a
+                # row the phone sends both ways is applied once (sync.replaces)
+                live, gone = remote["intervals"].get(row["id"]), remote["deleted"].get(row["id"])
+                old = live or gone
+                taken = not old or sync.replaces(old[3], old is gone, updated, bool(row.get("deleted_at")))
+                sync.apply_pulled(remote, row, "direct")
+                part["accepted" if taken else "ignored"] += 1
         if remote != before:
             sync.save_remote(remote)
     with _usage_lock:

@@ -45,7 +45,17 @@ It also adds an icon to the hidden icons menu (the ^ arrow next to the system cl
 
 The **Connect** tab connects this PC to your own Screen Time server (HTTPS only; plain HTTP is accepted only for `localhost`). Enter the server address, your name and password, and a name for this PC. The password is used once to register the PC and is never saved; the device token goes into Windows Credential Manager, and the server address, the sync mode and what was already sent into `%LOCALAPPDATA%\ScreenTime\sync_state.json`. After that, changes to the PC-on and active periods and the per-app times are sent every 5 minutes (retried every minute while the server can't be reached), and only what changed. Each sync also pulls what other devices sent (phone and sleep periods), into `%LOCALAPPDATA%\ScreenTime\remote_intervals.json`, so the timelines work offline. Use **Sync** (the same button as in the Report tab) to sync right away, or **Disconnect** to stop (the device stays registered on the server). Keep this PC on the timezone set for your account, since days follow the PC's clock. Days logged before this version have PC-on periods but no active periods.
 
-**Sync with** (also in the Connect tab) chooses how this PC syncs: **Server** (the default, as described above), **Phone directly** or **Both**. Syncing directly with the phone over your own network isn't built yet, so for now **Phone directly** syncs nothing and **Both** works like **Server**. Each way of syncing keeps its own record of what it already sent and where its last pull stopped, so switching never sends rows twice.
+**Sync with** (also in the Connect tab) chooses how this PC syncs with your phone. Phone and sleep periods arrive by two routes: pulled from your server, or pushed by the phone straight to this PC.
+
+| Mode | Server | Phone, directly |
+|---|---|---|
+| **Server** (the default) | this PC sends its periods and app times every 5 minutes and pulls the phone's | only if **Allow phone sync** is on |
+| **Phone directly** | off: the status says so | the phone connects to this PC while **Allow phone sync** is on; this PC never connects to the phone |
+| **Both** | as in **Server** | as in **Phone directly** |
+
+The two routes are independent. Each keeps its own progress: what was sent to it, and where its last pull stopped, so switching never sends rows twice. If the server can't be reached, the phone still syncs directly, and the other way round. If the server doesn't know this PC's pull cursor (for example, it was restored from an older backup), only the server's cursor starts over; nothing that the phone pushed directly is lost. Connecting to another server or disconnecting forgets only the periods that came from the server alone. Periods the phone also pushed directly stay, and so do periods stored before routes were recorded. Periods show in the timelines the same way whichever route brought them.
+
+Every row has an ID that doesn't depend on the route (made from the device and the period), and an `updated_at`. A row is merged the same way whichever route brings it: the newer `updated_at` wins; on the same `updated_at` a deletion wins over a live copy, so the result doesn't depend on which route was heard first; otherwise the copy already stored stays, so the same row arriving by both routes is applied once. Each stored row also remembers which routes delivered it.
 
 **Export backup…** saves a JSON file with this PC's PC-on and active periods and app times (in the same format that is sent to the server) and the phone and sleep periods it has pulled, including the ones it saw deleted. **Import backup…** merges a backup in. Every row has an `updated_at`, and the newer copy wins, the same rule a sync uses. Rows the import loses don't change anything, and an old backup can't bring back a period that was deleted since. Phone and sleep periods are merged from any backup, also from a phone's. This PC's own periods and app times are only restored from a backup of this same install, i.e. with the same `sync_state.json`. They are restored into past days' logs whose file is older than the backup, or missing. Today's log is being written right now, so it is never overwritten. Restored days are checked again on the next sync.
 
@@ -87,7 +97,7 @@ screentime/            the Python package
   tray.py              tray icon (Win32 via ctypes)
   icons.py             app icons for the Report tab, read from each .exe
   tracker.py           sampling, daily logs, console tracker
-  sync.py              sync: transports (server; direct is a placeholder), sync mode, device token,
+  sync.py              sync: the server transport, sync mode, merge rule and routes, device token,
                        background push and pull, backup export and import
   peer.py              phone sync listener: HTTPS API the phone connects to, limits, change feed
   tlscert.py           makes the listener's self-signed TLS certificate (with cryptography)
@@ -115,6 +125,7 @@ Each test points the app at a new temporary logs folder and a test Credential Ma
 - `test_pull.py`: pulling phone and sleep periods, paging, cursors, the Report timelines
 - `test_transports.py`: per-transport progress, migrating older state files, the sync mode, remembered deletions
 - `test_backup.py`: export/import round trip and the newest-wins merge
+- `test_both.py`: both routes at once, with a fake server and a fake phone pushing to the real listener: the same row applied once, overlapping and conflicting rows in either order, per-route cursors and resets, one route down, the timelines
 - `test_firewall.py`: the firewall verdicts on made-up rules (allowed, blocked by a rule, all incoming blocked, no rule for this network type, discovery blocked), and one real read-only query of this PC's firewall
 - `test_peer.py`: the phone sync listener on `127.0.0.1` over HTTPS: the phone's last sync, discovery over UDP (answers only the paired phone, rate limit, stops with the listener, a taken port), the certificate fingerprint, pairing (one-time secret, expiry, replacing a phone), wrong secret or key, replayed nonces, revoked pairing, hello, pull, push, bad input, oversize bodies, rate limits, too many connections
 - `test_ui.py`: the Connect tab: connecting, Sync, Disconnect, sync mode, backup buttons, Allow phone sync

@@ -153,11 +153,11 @@ check(timeline.day_spans(r, yesterday, "sleep") == [[first(23, 10), 86400]], "sl
 check(timeline.day_spans(r, today - timedelta(days=3), "sleep") == [], "no spans on other days")
 check(timeline.total([[0, 10], [20, 25]]) == 15, "total")
 
-# --- disconnect and reconnect clear the store ---
+# --- disconnect and reconnect forget what only the server delivered ---
 sync.disconnect()
-check(not os.path.exists(sync.remote_path()) and sync.load_remote()["intervals"] == {}, "disconnect clears pulled data")
+check(sync.load_remote() == {"intervals": {}, "deleted": {}}, "disconnect forgets what the server delivered")
 sync.connect(URL, "tester", "secret", "TestPC")
-check(not os.path.exists(sync.remote_path()), "connect starts with an empty store")
+check(sync.load_remote() == {"intervals": {}, "deleted": {}}, "connect starts without the old server's rows")
 
 # --- the worker pulls after pushing ---
 class FakeTracker:

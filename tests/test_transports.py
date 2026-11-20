@@ -132,7 +132,7 @@ worker = sync.SyncWorker(FakeTracker, statuses.append)
 sync.connect(URL, "tester", "secret", "TestPC")
 Fake.pushes.clear()
 Fake.pulls.clear()
-check(worker.cycle() == sync.SYNC_EVERY and statuses[-1] == sync.DIRECT_NOT_READY, "direct mode: says it isn't ready")
+check(worker.cycle() == sync.SYNC_EVERY and statuses[-1] == sync.DIRECT_MODE_STATUS, "direct mode: says server sync is off")
 check(Fake.pushes == [] and Fake.pulls == [], "direct mode: the server isn't contacted")
 sync.set_mode("both")
 check(worker.cycle() == sync.SYNC_EVERY and statuses[-1].startswith("Synced at"), "both mode: syncs with the server")
@@ -141,9 +141,9 @@ sync.set_mode("server")
 check(worker.cycle() == sync.SYNC_EVERY and statuses[-1].startswith("Synced at"), "server mode: syncs as before")
 try:
     sync.sync_once(today, LOG, name="direct")
-    check(False, "direct transport isn't usable yet")
+    check(False, "this PC doesn't push to the phone")
 except sync.SyncError as e:
-    check(str(e) == sync.DIRECT_NOT_READY, "direct transport raises 'not available yet'")
+    check("connects to it" in str(e), f"direct transport: the phone connects to this PC instead ({e})")
 try:
     sync.transport_for("nope", sync.load_state())
     check(False, "unknown transport")
@@ -186,10 +186,11 @@ state = sync.load_state()
 state["transports"]["direct"]["cursor"] = "lost"
 state["transports"]["server"]["cursor"] = "77"
 sync.save_state(state)
-check(sync.pull_once(name="direct") == 1, "unknown cursor: direct pulls again from the start")
+check(sync.pull_once(name="direct") == 0, "unknown cursor: direct pulls again from the start; its row is there already")
 state = sync.load_state()
-check(state["transports"]["direct"]["cursor"] == "m1" and state["transports"]["server"]["cursor"] == "0",
-      "emptying the store sends every transport back to the start")
+check(state["transports"]["direct"]["cursor"] == "m1" and state["transports"]["server"]["cursor"] == "77",
+      "only that route's cursor starts over; the server's stays")
+check(phone in sync.load_remote()["intervals"], "the store isn't emptied")
 sync.transport_for = real_transport_for
 
 # --- remembered deletions ---

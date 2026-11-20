@@ -2,9 +2,10 @@
 
 Sends each day's PC-on and active periods and per-app times to other devices and pulls theirs
 (phone and sleep periods). Each way of doing that is a transport with two calls: send the rows
-that changed, and fetch the rows changed since a cursor. Today the only working transport is
-your own Screen Time server over HTTPS; "direct" (the phone connecting to this PC) is a
-placeholder. The sync mode setting picks server, direct or both.
+that changed, and fetch the rows changed since a cursor. This PC uses one: your own Screen Time
+server over HTTPS. The other route, "direct", is the phone connecting to this PC (peer.py); its rows
+go into the same store with the same merge rule (replaces), and each stored row remembers its routes.
+The sync mode setting picks server, direct or both; in direct, this PC doesn't sync with the server.
 
 The password is used once to register this PC; only the device token is kept, in Windows
 Credential Manager. Everything else (server address, sync mode, and per transport what was
@@ -45,7 +46,10 @@ PULL_LIMIT = 1000  # rows per pull request
 TRANSPORTS = ("server", "direct")  # each keeps its own progress in state["transports"]
 MODES = {"server": ("server",), "direct": ("direct",), "both": ("server", "direct")}  # mode -> transports
 DEFAULT_MODE = "server"
-DIRECT_NOT_READY = "Direct sync isn't available yet. Choose Server or Both to sync."
+# Mode "Phone directly": this PC doesn't sync with the server; the phone connects to this PC instead
+DIRECT_MODE_STATUS = ("Server sync is off (Sync with: Phone directly). The phone syncs with this PC itself "
+                      "while Allow phone sync is on.")
+ROUTES = ("server", "direct")  # how rows from other devices arrive: pulled from the server, pushed by the phone
 OWN_TIMELINES = {"pc_on": "on_timeline", "pc_active": "active_timeline"}  # this PC's interval kinds
 APP_FIELDS = {"focus_s": "focus", "cursor_s": "cursor", "active_s": "active"}  # app row field -> log kind
 TABLES = ("intervals", "app_usage_daily")
@@ -228,8 +232,9 @@ def empty_remote():
 
 
 def load_remote():
-    """{"intervals": {id: [kind, start, end, updated_at, device_id]}, "deleted": {id: same}} (times
-    are UTC epoch seconds; "deleted" remembers deletions, so an older copy can't bring a row back).
+    """{"intervals": {id: [kind, start, end, updated_at, device_id, routes]}, "deleted": {id: same}} (times
+    are UTC epoch seconds; "deleted" remembers deletions, so an older copy can't bring a row back; routes
+    lists how the row arrived, "server" and/or "direct", and is missing in entries saved before it existed).
     The result is replaced, never changed, when the file does, so readers can keep it."""
     path = remote_path()
     try:
@@ -256,14 +261,30 @@ def save_remote(remote):
     os.replace(path + ".tmp", path)
 
 
-def reset_remote(state):
-    """Forget the pulled intervals; every transport then pulls from the start again (save state after)."""
-    for progress in state["transports"].values():
-        progress["cursor"] = "0"
-    try:
-        os.remove(remote_path())
-    except OSError:
-        pass
+def entry_routes(entry):
+    """How a stored row arrived; an entry saved before routes were kept counts as both, so forgetting one
+    route never drops what the other may have delivered."""
+    return list(entry[5]) if len(entry) > 5 else list(ROUTES)
+
+
+def forget_route(remote, route):
+    """Forget what only `route` delivered (e.g. after disconnecting the server). Rows the other route also
+    delivered stay, without this route; imported rows (no route) are never touched."""
+    for store in (remote["intervals"], remote["deleted"]):
+        for row_id, entry in list(store.items()):
+            routes = entry_routes(entry)
+            if routes == [route]:
+                del store[row_id]
+            elif route in routes and len(entry) > 5:
+                entry[5] = [r for r in routes if r != route]
+
+
+def forget_server_route():
+    """After connecting to another server or disconnecting: drop what only the server delivered. What the
+    phone pushed directly stays, and only the server's cursor starts over (the caller resets it)."""
+    remote = copy.deepcopy(load_remote())
+    forget_route(remote, "server")
+    save_remote(remote)
 
 
 def connected():
@@ -329,8 +350,8 @@ def connect(server, name, password, device_name):
         save_token(device["token"])
         state = load_state()
         state.update(server=server, device_id=device["device_id"], device_name=device["name"], last_sync=None)
-        state["transports"]["server"] = fresh_progress()
-        reset_remote(state)  # a new server has its own history to pull
+        state["transports"]["server"] = fresh_progress()  # a new server has its own history to pull
+        forget_server_route()
         save_state(state)
 
 
@@ -341,7 +362,7 @@ def disconnect():
         state = load_state()
         state.update(server=None, device_id=None, device_name=None, last_sync=None)
         state["transports"]["server"] = fresh_progress()
-        reset_remote(state)
+        forget_server_route()
         save_state(state)
 
 
@@ -418,7 +439,7 @@ def transport_for(name, state):
             raise SyncError("Not connected")
         return ServerTransport(state["server"], token)
     if name == "direct":
-        raise SyncError(DIRECT_NOT_READY)  # the phone will connect to this PC; not built yet
+        raise SyncError("This PC doesn't connect to the phone: the phone connects to it (Allow phone sync).")
     raise ValueError(f"unknown transport {name!r}")
 
 
@@ -528,22 +549,39 @@ def iso_epoch(seconds):
     return None if seconds is None else iso_micros(round(seconds * 1_000_000))
 
 
-def apply_pulled(remote, row):
-    """Apply one pulled interval: keep it only if it's newer than ours (or than our record of its
-    deletion); deleted ones are removed. Returns whether a stored interval changed."""
+def replaces(old_updated, old_deleted, updated, deleted):
+    """The merge rule, the same on the phone and for both routes: the newer updated_at wins; on the same
+    updated_at a deletion wins over a live copy (so the result doesn't depend on which route was heard
+    first); otherwise ours stays, so the same row arriving by both routes is applied once."""
+    if updated != old_updated:
+        return updated > old_updated
+    return deleted and not old_deleted
+
+
+def apply_pulled(remote, row, route=None):
+    """Apply one interval from another device with replaces(); deleted ones are removed (and remembered).
+    route ("server" or "direct") is recorded on the row even when ours is kept; None (an import) adds none.
+    Returns whether a stored interval changed."""
     if row["kind"] not in REMOTE_KINDS:
         return False
     updated = parse_utc(row["updated_at"])
-    old = remote["intervals"].get(row["id"]) or remote["deleted"].get(row["id"])
-    if old and old[3] >= updated:
+    deleted = bool(row.get("deleted_at"))
+    live, gone = remote["intervals"].get(row["id"]), remote["deleted"].get(row["id"])
+    old = live or gone
+    routes = entry_routes(old) if old else []
+    if route and route not in routes:
+        routes.append(route)
+    if old and not replaces(old[3], old is gone, updated, deleted):
+        if route and len(old) > 5 and route not in old[5]:
+            old[5] = sorted(routes)
         return False
-    if row.get("deleted_at"):
+    if deleted:
         when = lambda text: parse_utc(text) if text else None
         remote["deleted"][row["id"]] = [row["kind"], when(row.get("start_utc")), when(row.get("end_utc")),
-                                        updated, row.get("device_id")]
+                                        updated, row.get("device_id"), sorted(routes)]
         return remote["intervals"].pop(row["id"], None) is not None
     remote["intervals"][row["id"]] = [row["kind"], parse_utc(row["start_utc"]), parse_utc(row["end_utc"]),
-                                      updated, row.get("device_id")]
+                                      updated, row.get("device_id"), sorted(routes)]
     remote["deleted"].pop(row["id"], None)
     return True
 
@@ -563,14 +601,15 @@ def pull_once(name="server"):
             try:
                 rows, cursor, more = transport.fetch(progress["cursor"], PULL_LIMIT)
             except CursorUnknown:
+                # The other side doesn't know our cursor (e.g. it was restored from an older backup): pull this
+                # transport from the start. Only its cursor moves; rows stay, and replaces() keeps the newer copies.
                 if progress["cursor"] != "0" and not restarted:
-                    remote, restarted = empty_remote(), True
-                    reset_remote(state)  # every transport pulls from the start into the emptied store
+                    progress["cursor"], restarted = "0", True
                     save_state(state)
                     continue
                 raise
             try:
-                changed += sum(apply_pulled(remote, row) for row in rows)
+                changed += sum(apply_pulled(remote, row, name) for row in rows)
             except (KeyError, ValueError, TypeError) as e:
                 raise SyncError(f"Unexpected data from the server ({e})") from None
             save_remote(remote)
@@ -614,7 +653,7 @@ def export_backup(path, today, today_log):
                 own[table].append(dict(row, updated_at=stamp))
         pulled = []
         for deleted, store in ((False, remote["intervals"]), (True, remote["deleted"])):
-            for row_id, (kind, start, end, updated, device_id) in sorted(store.items()):
+            for row_id, (kind, start, end, updated, device_id, *_) in sorted(store.items()):
                 pulled.append({"id": row_id, "kind": kind, "start_utc": iso_epoch(start), "end_utc": iso_epoch(end),
                                "updated_at": iso_epoch(updated), "device_id": device_id,
                                "deleted_at": iso_epoch(updated) if deleted else None})
@@ -792,8 +831,8 @@ class SyncWorker:
         """One sync try; returns how many seconds to wait before the next."""
         try:
             mode = get_mode()
-            if not uses_server(mode):  # the only other transport, direct, isn't built yet
-                self.on_status(DIRECT_NOT_READY)
+            if not uses_server(mode):  # "Phone directly": the phone connects to this PC; nothing to do here
+                self.on_status(DIRECT_MODE_STATUS)
                 return SYNC_EVERY
             sent, rejected = sync_once(self.tracker.day, self.tracker.snapshot())
             pull_once()
