@@ -55,8 +55,17 @@ user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                 ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                              ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.LoadImageW.restype = wintypes.HANDLE
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = wintypes.LPARAM
+user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+user32.GetDpiForWindow.restype = wintypes.UINT
 HWND_TOPMOST = -1
 SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x1, 0x2, 0x10
+WM_SETICON, ICON_BIG, IMAGE_ICON, LR_LOADFROMFILE = 0x80, 1, 1, 0x10
+TASKBAR_ICON = 24  # px at 100% scaling; the taskbar scales it with the display
 SHELL_CLASSES = ("Progman", "WorkerW", "Shell_TrayWnd")  # desktop and taskbar
 
 
@@ -523,6 +532,8 @@ class App:
         root.protocol("WM_DELETE_WINDOW", root.withdraw)  # hide; the clock and tray icon stay
         if os.path.exists(ICON):
             root.iconbitmap(default=ICON)
+            self.taskbar_icon = None
+            root.bind("<Map>", self.set_taskbar_icon, add="+")
         style = ttk.Style()
         style.configure("Value.TLabel", font=("Segoe UI Semibold", 22))
         style.configure("Caption.TLabel", font=("Segoe UI", 9), foreground="#666")
@@ -808,6 +819,21 @@ class App:
         while not self.calls.empty():
             self.calls.get()()
         self.root.after(100, self.run_calls)
+
+    def set_taskbar_icon(self, event):
+        """Gives the taskbar button the icon at the exact size it draws (30 px at 125%).
+
+        Tk only hands Windows the 40 px icon at 125%, and the taskbar shrinks that to 30 px,
+        which blurs the bars. The .ico has a frame for each scaling; load the matching one.
+        """
+        if event.widget is not self.root:  # <Map> also fires for every child widget
+            return
+        hwnd = int(self.root.wm_frame(), 16)
+        if not self.taskbar_icon:
+            size = TASKBAR_ICON * (user32.GetDpiForWindow(hwnd) or 96) // 96
+            self.taskbar_icon = user32.LoadImageW(None, ICON, IMAGE_ICON, size, size, LR_LOADFROMFILE)
+        if self.taskbar_icon:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, self.taskbar_icon)
 
     def show(self):
         if self.root.state() != "normal":  # reopening a hidden or minimized window: start on Report
