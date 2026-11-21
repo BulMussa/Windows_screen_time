@@ -195,7 +195,8 @@ rows = app.timeline_rows(today, app.tracker.snapshot(), True)
 names = [r[0] for r in rows]
 check(names == ["Laptop", "Phone", "Sleep"], "three rows in order")
 check([p[0] for p in rows[0][3]] == ["Laptop \u00b7 PC on"], "laptop: PC on only")
-check(rows[1][1] == "1h 25m" and rows[2][1] == "6h 50m", f"summaries: {rows[0][1]} / {rows[1][1]} / {rows[2][1]}")
+# Sleep counts the whole night (23:10 yesterday - 06:50), not only the part after midnight
+check(rows[1][1] == "1h 25m" and rows[2][1] == "7h 40m", f"summaries: {rows[0][1]} / {rows[1][1]} / {rows[2][1]}")
 check(rows[0][1].startswith("1h 1") and rows[0][1].endswith(" on"), f"laptop summary is the PC-on total ({rows[0][1]})")
 
 # hover a phone period
@@ -217,6 +218,14 @@ x1, y1, x2, y2 = app.timeline.bbox(on[0])
 ev.x, ev.y = (x1 + x2) / 2, (y1 + y2) / 2
 app.hover_timeline(ev)
 check(app.tip_labels[1].cget("text") == "Laptop \u00b7 PC on", "hovering a laptop period shows PC on")
+app.hover_timeline(None)
+# a sleep period shows its whole night
+night = next(p for p in app.periods if p[3] == "Sleep")
+x1, y1, x2, y2 = app.timeline.bbox(night[0])
+ev.x, ev.y = (x1 + x2) / 2, (y1 + y2) / 2
+app.hover_timeline(ev)
+check([w.cget("text") for w in app.tip_labels] == ["23:10 (yesterday) – 06:50", "Sleep", "7h 40m"],
+      f"hovering sleep shows the whole session ({[w.cget('text') for w in app.tip_labels]})")
 app.hover_timeline(None)
 
 # old day: laptop only, solid blue, other rows empty with no hint when connected

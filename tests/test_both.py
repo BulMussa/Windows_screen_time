@@ -269,9 +269,10 @@ for route in ("server", "direct", "both"):
     if route in ("direct", "both"):
         phone_push(*rows)
     r = sync.load_remote()
-    spans.append([timeline.day_spans(r, DAY, kind) for kind in ("phone_active", "sleep")])
+    spans.append([timeline.day_spans(r, DAY, kind) for kind in ("phone_active", "sleep")] + [timeline.sleep_row(r, DAY)])
 check(spans[0] == spans[1] == spans[2], f"same spans by server, by the phone, and by both: {spans[0]}")
 check(spans[0][0] == [[7 * 3600, 9 * 3600]] and spans[0][1] == [[22 * 3600, 23 * 3600]], "and the right ones")
+check(spans[0][2] == ([[22 * 3600, 23 * 3600, 22 * 3600, 23 * 3600]], 3600), f"and the same Sleep row: {spans[0][2]}")
 
 # --- 7. the merge rule ---
 check(sync.replaces(1, False, 2, False) and not sync.replaces(2, False, 1, False), "newer wins, older loses")

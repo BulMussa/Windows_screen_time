@@ -32,7 +32,7 @@ from .tracker import (APP_PATHS, KINDS, LOG_DIR, MONITOR_DEFAULTTONEAREST, MONIT
                       wait_until_stopped)
 from .icons import _png, icon_png, large_icon_size, small_icon_size
 from .report import logged_days, read_log, read_logs, summarize
-from .timeline import day_spans, total
+from .timeline import day_spans, sleep_row, span_times, total
 from .tray import TrayIcon
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -603,7 +603,7 @@ class App:
         self.timeline.bind("<Motion>", self.hover_timeline)
         self.timeline.bind("<Enter>", self.hover_timeline)  # entering lands on a period without a <Motion>
         self.timeline.bind("<Leave>", lambda e: self.hover_timeline(None))
-        self.periods = []  # (canvas item, start, end, title, color, hover color) of each period drawn
+        self.periods = []  # (canvas item, start, end, title, color, hover color, span) of each period drawn
         # Under the row names: sync without going to the Connect tab
         self.sync_buttons = [SyncButton(self.timeline, self, self.sync_from_report)]
         self.syncing = False  # a sync started from a Sync button, whose result they wait for
@@ -982,7 +982,8 @@ class App:
         """
         on = log.get("on_timeline") if today or log.get("on_timeline") else None
         remote = sync.load_remote()
-        phone, sleep = day_spans(remote, day, "phone_active"), day_spans(remote, day, "sleep")
+        phone = day_spans(remote, day, "phone_active")
+        sleep, slept = sleep_row(remote, day)  # whole sessions, counted on the day they end on
         if on is None and not phone and not sleep:
             return None
         hint = "" if sync.load_state()["server"] else "Not connected (Connect tab)"
@@ -990,7 +991,7 @@ class App:
                  [("Laptop · PC on", TIMELINE_ON, TIMELINE_HOVER, on or [])]),
                 ("Phone", short(total(phone)) if phone else "", hint,
                  [("Phone · Active", TIMELINE_PHONE, TIMELINE_PHONE_HOVER, phone)]),
-                ("Sleep", short(total(sleep)) if sleep else "", hint,
+                ("Sleep", short(slept) if slept is not None else "", hint,
                  [("Sleep", TIMELINE_SLEEP, TIMELINE_SLEEP_HOVER, sleep)])]
 
     def draw_timeline(self, rows, today=True):
@@ -1024,10 +1025,11 @@ class App:
                 ya, yb = pill_edges(xh, y1, y2, left, right)
                 c.create_line(xh, ya, xh, yb, fill=bg)
             for title, color, hover, spans in parts:
-                for start, end in spans:
+                for span in spans:
+                    start, end = span[:2]
                     points = pill_points(x(start), max(x(end), x(start) + 1), y1, y2, left, right)
                     item = c.create_polygon(points, fill=color, outline="")
-                    self.periods.append((item, start, end, title, color, hover))
+                    self.periods.append((item, start, end, title, color, hover, span))
             if hint and not any(spans for *_, spans in parts):
                 c.create_text((left + right) / 2, mid, text=hint, fill="#888", font=self.timeline_font)
         # A label every 3 hours, or every 6 when the bar is too narrow for them to fit side by side
@@ -1097,9 +1099,8 @@ class App:
                 self.tip.destroy()
                 self.tip = None
             return
-        _, start, end, title, _, _ = found
-        hm = lambda sec: f"{int(sec) // 3600:02d}:{int(sec) % 3600 // 60:02d}"
-        lines = [f"{hm(start)} – {hm(end)}", title, short(end - start)]
+        times, seconds = span_times(found[6])  # a sleep period shows its whole session
+        lines = [times, found[3], short(seconds)]
         if not self.tip:
             self.tip = tk.Toplevel(self.root)
             self.tip.overrideredirect(True)
