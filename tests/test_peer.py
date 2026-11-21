@@ -47,10 +47,13 @@ for d in days:
 today_log = json.loads(json.dumps(LOG))
 
 # --- config and addresses ---
-check(peer.load_config() == {"enabled": False, "port": peer.DEFAULT_PORT, "paired": None, "pairing": None},
-      "off by default, nothing paired")
-check(peer.set_enabled(True)["enabled"] and not peer.set_enabled(False)["enabled"], "Allow phone sync is saved")
-peer.set_enabled(True)
+check(peer.load_config() == {"port": peer.DEFAULT_PORT, "paired": None, "pairing": None}, "nothing paired")
+check(not peer.take_legacy_enabled(), "no old Allow phone sync setting")
+peer.save_config({**peer.load_config(), "enabled": True})  # from before the sync mode decided it
+check(peer.take_legacy_enabled() and "enabled" not in peer.load_config() and not peer.take_legacy_enabled(),
+      "the old setting is read once, then forgotten")
+check(sync.uses_direct("direct") and sync.uses_direct("both") and not sync.uses_direct("server"),
+      "the listener runs with Phone directly and Both")
 for ip, private, client in (("192.168.1.20", True, True), ("10.0.0.5", True, True), ("172.20.1.1", True, True),
                             ("169.254.3.4", True, True), ("127.0.0.1", False, True), ("::1", False, True),
                             ("8.8.8.8", False, False), ("100.64.1.1", False, False), ("0.0.0.0", False, False),

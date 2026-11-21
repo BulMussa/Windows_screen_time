@@ -79,6 +79,19 @@ def pump(seconds=0.3, until=None, limit=15):
 root = app_mod.tk.Tk()
 root.geometry("+80+60")
 app = app_mod.App(root, tracker.Tracker())
+# The phone listener starts with the Phone directly and Both modes: on 127.0.0.1 here, so nothing
+# listens on the network, and with a stand-in for the firewall check (that one runs PowerShell)
+app.peer.host, app.peer.port, app.peer.discovery_port = "127.0.0.1", 0, 0
+firewall_asked = []
+
+
+def fake_firewall(ip, port, discovery_port, program=None):  # the real check: tests/test_firewall.py
+    firewall_asked.append((ip, port, discovery_port))
+    return firewall_answer[0]
+
+
+firewall_answer = [("blocked", "Windows Firewall blocks Screen Time on this public network (rule \"x\").")]
+app_mod.firewall.check = fake_firewall
 pump(0.5)
 tabs = [app.tabs.tab(t, "text") for t in app.tabs.tabs()]
 check(tabs == ["Report", "History", "Settings", "Connect"], f"tabs {tabs}")
@@ -128,6 +141,20 @@ check(app.sync_form.winfo_ismapped() and sync.load_token() is None, "disconnect 
 # --- sync mode ---
 check(app.sync_mode.get() == "server" and len(app.mode_buttons) == 3, "mode choice shows Server")
 check(all(b.winfo_ismapped() for b in app.mode_buttons + app.backup_buttons), "mode and backup controls visible")
+
+
+def sections():
+    pump(0.2)
+    return app.phone_section.winfo_ismapped(), app.server_section.winfo_ismapped()
+
+
+check(sections() == (False, True), "server mode: Server section only")
+app.sync_mode.set("both")
+check(sections() == (True, True), "both: Phone and Server sections")
+app.sync_mode.set("direct")
+check(sections() == (True, False), "phone directly: Phone section only")
+app.sync_mode.set("server")
+check(sections() == (False, True), "server again: Server section only")
 app.sync_from_report()
 check(app.tabs.index(app.tabs.select()) == 3, "server mode, not connected: Report's Sync opens the Connect tab")
 app.tabs.select(0)
@@ -135,6 +162,8 @@ app.sync_mode.set("direct")
 app.change_sync_mode()
 check(pump(until=lambda: app.sync_status.get() == sync.DIRECT_MODE_STATUS), f"direct: status {app.sync_status.get()}")
 check(sync.get_mode() == "direct", "direct mode saved")
+check(pump(until=lambda: app.phone_status.get().startswith("Listening on")), f"direct: listening: {app.phone_status.get()}")
+check(app.phone_row.winfo_manager() == "pack", "direct: the listener's state shows under Sync with")
 pump(0.2)
 app.sync_from_report()
 check(app.tabs.index(app.tabs.select()) == 0, "direct mode: Report's Sync syncs instead of opening the Connect tab")
@@ -144,6 +173,9 @@ app.sync_mode.set("server")
 app.change_sync_mode()
 check(pump(until=lambda: sync.get_mode() == "server" and app.sync_status.get() == "Not connected"),
       "back to server mode")
+check(pump(until=lambda: app.phone_status.get() == app_mod.PHONE_OFF and app.peer.thread is None),
+      "server mode: listener stopped")
+check(app.phone_row.winfo_manager() == "", "server mode: no phone listener text under Sync with")
 app.tabs.select(3)
 
 # --- backup buttons ---
@@ -172,31 +204,23 @@ app.import_backup()
 check(pump(until=lambda: errors), "a bad file shows an error")
 check("isn't a Screen Time backup" in errors[-1] and app.backup_status.get() == "", f"error: {errors[-1]}")
 
-# --- Allow phone sync (on 127.0.0.1 here, so nothing listens on the network) ---
+# --- phone sync ---
 import http.client  # noqa: E402
 import socket  # noqa: E402
 import ssl  # noqa: E402
 from datetime import datetime  # noqa: E402
-check(not app.allow_phone.get() and app.phone_status.get() == "Off" and app.peer.thread is None,
-      "phone sync off by default, nothing listening")
-check(app.allow_phone_button.winfo_ismapped() and app.pair_button.winfo_ismapped(), "phone sync controls visible")
+check(app.phone_status.get() == app_mod.PHONE_OFF and app.peer.thread is None,
+      "server mode (the default): nothing listening")
+check(not hasattr(app, "allow_phone") and not app.pair_button.winfo_ismapped(),
+      "no Allow phone sync box; Pair phone hidden in server mode")
 check(app.paired_text.get() == "No phone paired" and "disabled" in app.unpair_button.state(),
       "nothing paired: Remove pairing disabled")
-app.peer.host, app.peer.port, app.peer.discovery_port = "127.0.0.1", 0, 0
-firewall_asked = []
-
-
-def fake_firewall(ip, port, discovery_port, program=None):  # the real check runs PowerShell (tests/test_firewall.py)
-    firewall_asked.append((ip, port, discovery_port))
-    return firewall_answer[0]
-
-
-firewall_answer = [("blocked", "Windows Firewall blocks Screen Time on this public network (rule \"x\").")]
-app_mod.firewall.check = fake_firewall
-app.pair_phone()  # turns phone sync on by itself
-check(pump(until=lambda: app.pair_dialog is not None), "Pair a phone opens the QR window")
-check(app.allow_phone.get() and peer.load_config()["enabled"] and app.phone_status.get().startswith("Listening on"),
-      f"pairing turned phone sync on: {app.phone_status.get()}")
+firewall_asked.clear()
+firewall_answer[0] = ("blocked", "Windows Firewall blocks Screen Time on this public network (rule \"x\").")
+app.pair_phone()  # switches Server to Both by itself
+check(pump(until=lambda: app.pair_dialog is not None), "Pair phone opens the QR window")
+check(app.sync_mode.get() == "both" and sync.get_mode() == "both" and app.phone_status.get().startswith("Listening on"),
+      f"pairing switched to Both and listens: {app.phone_status.get()}")
 check(pump(until=lambda: app.firewall_text.get()), "listening: the firewall is checked")
 check(firewall_asked[-1][:2] == app.peer.address and app.firewall_text.get().startswith("Windows Firewall blocks"),
       f"a blocking firewall is shown under the listener state: {app.firewall_text.get()}")
@@ -234,18 +258,17 @@ check(code == 200 and time.time() - start < 5, "the phone pairs while the window
 check(pump(until=lambda: dialog.done), "the QR window notices")
 check(dialog.status.get().startswith("Paired with Test Phone") and str(dialog.qr.cget("image")) == "",
       "it says so and hides the spent code")
-check(app.paired_text.get() == "Paired with Test Phone. The phone hasn't synced yet."
+check(app.paired_text.get() == "Paired with Test Phone"
       and "disabled" not in app.unpair_button.state(), f"Connect tab shows the paired phone: {app.paired_text.get()}")
 key = answer["key"]
 check(phone_call("GET", "/peer/hello", key)[0] == 200, "the phone's key works")
+check(app.last_sync_text.get() == "Not synced yet.", f"no server, phone not synced yet: {app.last_sync_text.get()}")
 check(phone_call("GET", "/peer/pull?since=0", key)[0] == 200, "the phone pulls")
-check(pump(until=lambda: "last synced at" in app.paired_text.get()), "the window notices the sync")
-check(app.paired_text.get() == f"Paired with Test Phone. Phone last synced at {datetime.now():%H:%M}."
-      or app.paired_text.get().startswith("Paired with Test Phone. Phone last synced at "),
-      f"Phone last synced at ...: {app.paired_text.get()}")
-check(app_mod.last_synced_text("2026-11-19T18:02:00", now=datetime(2026, 11, 20, 9, 0)) == "Phone last synced yesterday at 18:02."
-      and app_mod.last_synced_text("2026-11-02T07:05:00", now=datetime(2026, 11, 20, 9, 0)) == "Phone last synced on 2 Nov at 07:05."
-      and app_mod.last_synced_text(None) == "The phone hasn't synced yet.", "older syncs say the day")
+check(pump(until=lambda: app.last_sync_text.get().startswith("Last synced at ")), "the window notices the sync")
+check(app.last_sync_text.get().startswith("Last synced at "), f"Last synced at ...: {app.last_sync_text.get()}")
+check(app_mod.last_synced_text("2026-11-19T18:02:00", now=datetime(2026, 11, 20, 9, 0)) == "Last synced yesterday at 18:02."
+      and app_mod.last_synced_text("2026-11-02T07:05:00", now=datetime(2026, 11, 20, 9, 0)) == "Last synced on 2 Nov at 07:05."
+      and app_mod.last_synced_text(None) == "Not synced yet.", "older syncs say the day")
 dialog.close()
 pump(0.3)
 check(app.pair_dialog is None and peer.paired_phone()["name"] == "Test Phone", "closing after pairing keeps it")
@@ -268,15 +291,15 @@ app.remove_pairing()
 check(app.paired_text.get() == "No phone paired" and phone_call("GET", "/peer/hello", key)[0] == 401,
       "Remove pairing revokes the phone")
 
-app.allow_phone.set(False)
-app.toggle_phone_sync()
-check(pump(until=lambda: app.phone_status.get() == "Off" and app.peer.thread is None), "off: listener stopped")
-check(app.firewall_text.get() == "", "off: no firewall message")
-check(not peer.load_config()["enabled"], "off saved")
+app.sync_mode.set("server")
+app.change_sync_mode()
+check(pump(until=lambda: app.phone_status.get() == app_mod.PHONE_OFF and app.peer.thread is None),
+      "Server: listener stopped")
+check(app.firewall_text.get() == "", "Server: no firewall message")
 firewall_answer[0] = ("ok", "")
-app.allow_phone.set(True)
-app.toggle_phone_sync()
-check(pump(until=lambda: app.phone_status.get().startswith("Listening")), "on again")
+app.sync_mode.set("direct")
+app.change_sync_mode()
+check(pump(until=lambda: app.phone_status.get().startswith("Listening")), "Phone directly: listening again")
 asked = len(firewall_asked)
 check(pump(until=lambda: len(firewall_asked) >= asked and app.firewall_text.get() == "") and len(firewall_asked) >= 2,
       "firewall checked again; a firewall that lets the phone in shows nothing")

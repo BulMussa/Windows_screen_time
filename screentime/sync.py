@@ -48,7 +48,7 @@ MODES = {"server": ("server",), "direct": ("direct",), "both": ("server", "direc
 DEFAULT_MODE = "server"
 # Mode "Phone directly": this PC doesn't sync with the server; the phone connects to this PC instead
 DIRECT_MODE_STATUS = ("Server sync is off (Sync with: Phone directly). The phone syncs with this PC itself "
-                      "while Allow phone sync is on.")
+                      "over this network.")
 ROUTES = ("server", "direct")  # how rows from other devices arrive: pulled from the server, pushed by the phone
 OWN_TIMELINES = {"pc_on": "on_timeline", "pc_active": "active_timeline"}  # this PC's interval kinds
 APP_FIELDS = {"focus_s": "focus", "cursor_s": "cursor", "active_s": "active"}  # app row field -> log kind
@@ -418,6 +418,11 @@ def uses_server(mode):
     return "server" in MODES[mode]
 
 
+def uses_direct(mode):
+    """Whether the phone syncs with this PC directly: the window runs the phone listener then."""
+    return "direct" in MODES[mode]
+
+
 # --- Transports ---
 
 class Transport:
@@ -472,7 +477,7 @@ def transport_for(name, state):
             raise SyncError("Not connected")
         return ServerTransport(state["server"], token)
     if name == "direct":
-        raise SyncError("This PC doesn't connect to the phone: the phone connects to it (Allow phone sync).")
+        raise SyncError("This PC doesn't connect to the phone: the phone connects to it.")
     raise ValueError(f"unknown transport {name!r}")
 
 

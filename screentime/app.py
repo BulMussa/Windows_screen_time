@@ -218,21 +218,24 @@ def pill_points(xa, xb, y1, y2, left, right):
     return tops + [v for i in range(len(bottoms) - 2, -1, -2) for v in bottoms[i:i + 2]]
 
 
+PHONE_OFF = "Phone sync is off. Choose Phone directly or Both to let the phone sync with this PC."
+
+
 def last_synced_text(stamp, now=None):
-    """"Phone last synced at 12:39." from peer.json's last_sync (local time, ISO); yesterday and older days say so."""
+    """"Last synced at 12:39." from peer.json's last_sync (local time, ISO); yesterday and older days say so."""
     if not stamp:
-        return "The phone hasn't synced yet."
+        return "Not synced yet."
     try:
         when = datetime.fromisoformat(stamp)
     except ValueError:
-        return "The phone hasn't synced yet."
+        return "Not synced yet."
     today = (now or datetime.now()).date()
     clock = when.strftime("%H:%M")
     if when.date() == today:
-        return f"Phone last synced at {clock}."
+        return f"Last synced at {clock}."
     if when.date() == today - timedelta(days=1):
-        return f"Phone last synced yesterday at {clock}."
-    return f"Phone last synced on {when.day} {when:%b} at {clock}."
+        return f"Last synced yesterday at {clock}."
+    return f"Last synced on {when.day} {when:%b} at {clock}."
 
 
 def colored_button(parent, text, color, hover, command):
@@ -677,7 +680,13 @@ class App:
         choices = ttk.Frame(sync_tab)
         choices.pack(fill="x")
         ttk.Label(choices, text="Sync with", style="Heading.TLabel").pack(side="left", padx=(0, 14))
+        try:  # "Allow phone sync" ticked with Server meant Server plus the phone directly: that's Both now
+            if peer.take_legacy_enabled() and sync.get_mode() == "server":
+                sync.set_mode("both")
+        except OSError:
+            pass
         self.sync_mode = tk.StringVar(value=sync.get_mode())
+        self.mode_lock = threading.Lock()  # one mode change (and its listener start or stop) at a time
         self.mode_buttons = [ttk.Radiobutton(choices, text=label, value=value, variable=self.sync_mode,
                                              command=self.change_sync_mode)
                              for value, label in (("server", "Server"), ("direct", "Phone directly"), ("both", "Both"))]
@@ -685,23 +694,47 @@ class App:
             button.pack(side="left", padx=(0, 12))
         phone = ttk.Frame(sync_tab)
         phone.pack(fill="x", pady=(6, 0))
-        self.allow_phone = tk.BooleanVar(value=peer.load_config()["enabled"])
-        self.allow_phone_button = ttk.Checkbutton(phone, text="Allow phone sync", variable=self.allow_phone,
-                                                  command=self.toggle_phone_sync)
-        self.allow_phone_button.pack(side="left")
-        self.phone_status = tk.StringVar(value="Off")
+        # The phone listener's state: it runs while the mode includes Phone directly
+        self.phone_status = tk.StringVar(value=PHONE_OFF)
         phone_status = ttk.Label(phone, textvariable=self.phone_status, style="Caption.TLabel")
-        phone_status.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        phone_status.pack(side="left", fill="x", expand=True)
         phone_status.bind("<Configure>", lambda e: phone_status.configure(wraplength=e.width))
+        # Hidden while the listener is off (Server mode), so nothing sits between Sync with and the Sync button
+        self.phone_status.trace_add("write", lambda *_: phone.pack_forget() if self.phone_status.get() == PHONE_OFF
+                                    else phone.pack(fill="x", pady=(6, 0), after=choices))
+        phone.pack_forget()
+        self.phone_row = phone
         # Windows Firewall blocking the listener, checked whenever it starts listening (empty when it's fine)
         self.firewall_text = tk.StringVar()
         self.firewall_check = None  # the check whose answer is still wanted
         firewall_label = ttk.Label(sync_tab, textvariable=self.firewall_text, style="Warning.TLabel")
-        firewall_label.pack(fill="x", pady=(4, 0))
         firewall_label.bind("<Configure>", lambda e: firewall_label.configure(wraplength=e.width))
-        pairing = ttk.Frame(sync_tab)
-        pairing.pack(fill="x", pady=(6, 0))
-        self.pair_button = ttk.Button(pairing, text="Pair a phone…", command=self.pair_phone)
+        # Only takes room when there is a warning, so the Sync button sits right under the listener's state
+        def show_firewall(*_):
+            if self.firewall_text.get():
+                firewall_label.pack(fill="x", pady=(4, 0), after=phone)
+                self.root.after_idle(self.fit_height)
+            else:
+                firewall_label.pack_forget()
+        self.firewall_text.trace_add("write", show_firewall)
+        root.bind("<Map>", self.fit_height, add="+")  # shown again: make room for what changed while hidden
+        # Sync now, and when this PC last synced with the server or the phone, whichever was later
+        sync_row = ttk.Frame(sync_tab)
+        sync_row.pack(fill="x", pady=(6, 0))
+        self.sync_buttons.append(SyncButton(sync_row, self, self.start_sync))
+        self.sync_buttons[-1].frame.pack(side="left")
+        self.last_sync_text = tk.StringVar()
+        last_sync = ttk.Label(sync_row, textvariable=self.last_sync_text, style="Caption.TLabel")
+        last_sync.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        last_sync.bind("<Configure>", lambda e: last_sync.configure(wraplength=e.width))
+        # The Phone and Server sections, each shown only while Sync with includes it (show_sync_sections)
+        self.sync_row = sync_row
+        self.phone_section = ttk.Frame(sync_tab)
+        ttk.Separator(self.phone_section).pack(fill="x", pady=(8, 6))
+        ttk.Label(self.phone_section, text="Phone", style="Heading.TLabel").pack(anchor="w", pady=(0, 2))
+        pairing = ttk.Frame(self.phone_section)
+        pairing.pack(fill="x")
+        self.pair_button = ttk.Button(pairing, text="Pair phone", command=self.pair_phone)
         self.pair_button.pack(side="left")
         self.unpair_button = ttk.Button(pairing, text="Remove pairing", command=self.remove_pairing)
         self.unpair_button.pack(side="left", padx=(8, 0))
@@ -711,21 +744,19 @@ class App:
         paired.bind("<Configure>", lambda e: paired.configure(wraplength=e.width))
         self.pair_dialog = None
         self.show_pairing()
-        ttk.Separator(sync_tab).pack(fill="x", pady=10)
-        ttk.Label(sync_tab, text="Server sync", style="Heading.TLabel").pack(anchor="w", pady=(0, 4))
-        self.sync_status = tk.StringVar()
-        status = ttk.Label(sync_tab, textvariable=self.sync_status, style="Caption.TLabel")
-        status.pack(fill="x")
-        status.bind("<Configure>", lambda e: status.configure(wraplength=e.width))
-        self.sync_form = ttk.Frame(sync_tab)
+        self.server_section = ttk.Frame(sync_tab)
+        ttk.Separator(self.server_section).pack(fill="x", pady=(8, 6))
+        ttk.Label(self.server_section, text="Server", style="Heading.TLabel").pack(anchor="w", pady=(0, 2))
+        self.sync_status = tk.StringVar()  # the worker's last status; not shown, the Sync button says how it went
+        self.sync_form = ttk.Frame(self.server_section)
         self.sync_fields = {}
         for row, (label, key, default, secret) in enumerate((
                 ("Server", "server", "", False), ("Name", "name", "", False),
                 ("Password", "password", "", True), ("Device name", "device", sync.default_device_name(), False))):
-            ttk.Label(self.sync_form, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            ttk.Label(self.sync_form, text=label).grid(row=row, column=0, sticky="w", pady=2)
             self.sync_fields[key] = tk.StringVar(value=default)
             ttk.Entry(self.sync_form, textvariable=self.sync_fields[key], show="•" if secret else "") \
-                .grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=3)
+                .grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=2)
         self.sync_form.columnconfigure(1, weight=1)
         self.sync_error = tk.StringVar()
         error = ttk.Label(self.sync_form, textvariable=self.sync_error, foreground="#dc2626")
@@ -733,17 +764,15 @@ class App:
         error.bind("<Configure>", lambda e: error.configure(wraplength=e.width))
         self.connect_button = ttk.Button(self.sync_form, text="Connect", command=self.connect_sync)
         self.connect_button.grid(row=4, column=0, sticky="nw", pady=(8, 0))
-        self.sync_connected = ttk.Frame(sync_tab)
+        self.sync_connected = ttk.Frame(self.server_section)
         self.sync_info = tk.StringVar()
         info = ttk.Label(self.sync_connected, textvariable=self.sync_info)
         info.pack(fill="x")
         info.bind("<Configure>", lambda e: info.configure(wraplength=e.width))
-        buttons = ttk.Frame(self.sync_connected)
-        buttons.pack(anchor="w", pady=(8, 0))
-        self.sync_buttons.append(SyncButton(buttons, self, self.start_sync))
-        self.sync_buttons[-1].frame.pack(side="left")
-        ttk.Button(buttons, text="Disconnect", command=self.disconnect_sync).pack(side="left", padx=(8, 0))
+        ttk.Button(self.sync_connected, text="Disconnect", command=self.disconnect_sync).pack(anchor="w", pady=(8, 0))
         self.show_sync_state()
+        self.show_sync_sections()
+        self.sync_mode.trace_add("write", lambda *_: self.show_sync_sections())  # whoever changes the mode
         # Packed from the bottom, so they stay put while the form above changes to the connected panel
         backup = ttk.Frame(sync_tab)
         backup.pack(side="bottom", fill="x")
@@ -778,14 +807,15 @@ class App:
         ])
         self.syncer = sync.SyncWorker(tracker, lambda text: self.calls.put(lambda: self.sync_status_changed(text)))
         self.syncer.start()
-        # The phone connects to this PC while "Allow phone sync" is on
+        # The phone connects to this PC while Sync with is Phone directly or Both
         self.peer = peer.PeerListener(
             lambda: (self.tracker.day, self.tracker.snapshot()),
             on_status=lambda text: self.calls.put(lambda: self.phone_status_changed(text)),
             on_change=lambda: self.calls.put(self.phone_pushed),
             on_paired=lambda: self.calls.put(self.show_pairing),
             on_synced=lambda: self.calls.put(self.show_pairing))
-        if self.allow_phone.get():
+        if sync.uses_direct(self.sync_mode.get()):
+            self.phone_status.set("Starting...")
             self.peer.start()
         threading.Thread(target=self.track, daemon=True).start()
         self.refresh()
@@ -1118,17 +1148,53 @@ class App:
         except OSError as e:
             messagebox.showerror("Screen Time", f"Couldn't save the setting:\n{e}")
 
+    def show_last_sync(self):
+        """Beside the Connect tab's Sync button: the later of the last server sync and the paired phone's last sync."""
+        try:
+            state = sync.load_state()
+        except (OSError, ValueError):
+            state = {}
+        server = state.get("last_sync") if state.get("server") else None
+        phone = (peer.paired_phone() or {}).get("last_sync")
+        stamps = [s for s in (server, phone) if s]
+        self.last_sync_text.set(last_synced_text(max(stamps) if stamps else None))
+
+    def show_sync_sections(self):
+        """Show the Phone section with Phone directly or Both, and the Server section with Server or Both."""
+        mode = self.sync_mode.get()
+        previous = self.sync_row
+        for section, shown in ((self.phone_section, sync.uses_direct(mode)),
+                               (self.server_section, sync.uses_server(mode))):
+            if shown:
+                section.pack(fill="x", after=previous)
+                previous = section
+            else:
+                section.pack_forget()
+        self.root.after_idle(self.fit_height)
+
+    def fit_height(self, event=None):
+        """Grow the window when its content needs more height than it has (Both mode with the server form
+        and a firewall warning does), but not past the screen. It never shrinks it."""
+        if event is not None and event.widget is not self.root or not self.root.winfo_ismapped():
+            return
+        self.root.update_idletasks()
+        have = self.root.winfo_height()
+        height = min(self.root.winfo_reqheight(), self.root.winfo_screenheight() - 80)
+        if height > have:
+            self.root.geometry(f"{self.root.winfo_width()}x{height}")
+
     def show_sync_state(self):
         """Show the connected panel or the connect form, whichever applies."""
+        self.show_last_sync()
         state = sync.load_state()
         if state["server"] and sync.load_token():
             self.sync_form.pack_forget()
             self.sync_info.set(f"Connected to {state['server']} as \"{state['device_name']}\".")
-            self.sync_connected.pack(fill="x", pady=(12, 0))
+            self.sync_connected.pack(fill="x")
             self.sync_status.set("Waiting for the first sync...")
         else:
             self.sync_connected.pack_forget()
-            self.sync_form.pack(fill="x", pady=(12, 0))
+            self.sync_form.pack(fill="x")
             self.sync_status.set("Not connected")
 
     def connect_sync(self):
@@ -1182,6 +1248,7 @@ class App:
 
     def sync_status_changed(self, text):
         self.sync_status.set(text)
+        self.show_last_sync()
         if self.syncing:  # the Sync buttons are waiting for this
             self.syncing = False
             if text == sync.DIRECT_MODE_STATUS:  # nothing to sync from here: not a failure
@@ -1193,45 +1260,36 @@ class App:
         self.ticks = 0  # redraw the timeline soon, in case the sync brought phone or sleep data
 
     def disconnect_sync(self):
-        if messagebox.askyesno("Screen Time", "Disconnect from the server?\n\nWhat was already sent stays "
-                                              "there, and this PC stops sending."):
+        if messagebox.askyesno("Screen Time", "Disconnect from the server?"):
             sync.disconnect()
             self.show_sync_state()
             self.ticks = 0  # the pulled phone and sleep data is gone; redraw the timeline soon
 
     def change_sync_mode(self):
-        """Save the chosen sync mode and sync with it right away."""
+        """Save the chosen sync mode, start or stop the phone listener for it and sync right away."""
         mode = self.sync_mode.get()
+        if sync.uses_direct(mode) and not self.peer.address:
+            self.phone_status.set("Starting...")
 
-        def work():  # off the Tk thread: it waits for a sync that is running
-            try:
-                sync.set_mode(mode)
-            except OSError as e:
-                self.calls.put(lambda: messagebox.showerror("Screen Time", f"Couldn't save the sync mode:\n{e}"))
-                return
+        def work():  # off the Tk thread: it waits for a running sync, and for the listener to stop
+            with self.mode_lock:
+                try:
+                    sync.set_mode(mode)
+                except OSError as e:
+                    self.calls.put(lambda: messagebox.showerror("Screen Time", f"Couldn't save the sync mode:\n{e}"))
+                    return
+                self.run_phone_listener(mode)
             self.calls.put(self.start_sync)
         threading.Thread(target=work, daemon=True).start()
 
-    def toggle_phone_sync(self):
-        """Save "Allow phone sync" and start or stop the listener, off the Tk thread (stopping waits
-        for it, and the first start makes the certificate)."""
-        enabled = self.allow_phone.get()
-        self.allow_phone_button.state(["disabled"])
-        self.phone_status.set("Starting..." if enabled else "Stopping...")
-
-        def work():
-            try:
-                peer.set_enabled(enabled)
-                if enabled:
-                    self.peer.start()
-                else:
-                    self.peer.stop()
-                    self.calls.put(lambda: self.phone_status.set("Off"))
-            except OSError as e:
-                self.calls.put(lambda: (self.allow_phone.set(not enabled), self.phone_status.set(
-                    f"Couldn't save the setting: {e}")))
-            self.calls.put(lambda: self.allow_phone_button.state(["!disabled"]))
-        threading.Thread(target=work, daemon=True).start()
+    def run_phone_listener(self, mode):
+        """Start or stop the listener the phone connects to, as the sync mode says. Off the Tk thread:
+        stopping waits for it, and the first start makes the certificate."""
+        if sync.uses_direct(mode):
+            self.peer.start()
+        else:
+            self.peer.stop()
+            self.calls.put(lambda: self.phone_status.set(PHONE_OFF))
 
     def phone_status_changed(self, text):
         """The listener's state; once it listens, check in the background whether Windows Firewall lets the phone in."""
@@ -1253,10 +1311,10 @@ class App:
         self.ticks = 0  # the phone sent periods: redraw the timeline soon
 
     def show_pairing(self):
-        """The paired phone under "Allow phone sync", and in the pairing window once the phone paired."""
+        """The paired phone next to the pairing buttons, and in the pairing window once it paired."""
         phone = peer.paired_phone()
-        self.paired_text.set(f"Paired with {phone['name']}. {last_synced_text(phone.get('last_sync'))}"
-                             if phone else "No phone paired")
+        self.paired_text.set(f"Paired with {phone['name']}" if phone else "No phone paired")
+        self.show_last_sync()
         self.unpair_button.state(["!disabled"] if phone else ["disabled"])
         dialog = self.pair_dialog
         if dialog and phone and phone != dialog.phone_before and not dialog.done:
@@ -1266,20 +1324,28 @@ class App:
             dialog.close_button.configure(text="Done")
 
     def pair_phone(self):
-        """Allow phone sync if it's off, open a pairing and show its QR code."""
+        """Switch Sync with from Server to Both (the phone needs the listener), open a pairing and
+        show its QR code."""
         if self.pair_dialog:
             self.pair_dialog.lift()
             return
         self.pair_button.state(["disabled"])
-        if not self.allow_phone.get():
-            self.allow_phone.set(True)
+        before = self.sync_mode.get()
+        if not sync.uses_direct(before):
+            self.sync_mode.set("both")
             self.phone_status.set("Starting...")
 
         def work():  # off the Tk thread: starting the listener can take a moment the first time
             error, payload = None, None
             try:
-                peer.set_enabled(True)
-                self.peer.start()
+                with self.mode_lock:
+                    if not sync.uses_direct(before):
+                        try:
+                            sync.set_mode("both")
+                        except OSError:
+                            self.calls.put(lambda: (self.sync_mode.set(before), self.phone_status.set(PHONE_OFF)))
+                            raise
+                    self.peer.start()
                 self.peer.ready.wait(10)
                 address = self.peer.address
                 if not address:
@@ -1307,8 +1373,7 @@ class App:
     def remove_pairing(self):
         phone = peer.paired_phone()
         if phone and messagebox.askyesno(
-                "Screen Time", f"Remove the pairing with {phone['name']}?\n\nIt can't sync with this PC "
-                               "until you pair it again."):
+                "Screen Time", f"Remove the pairing with {phone['name']}?"):
             peer.remove_pairing()
             self.show_pairing()
 

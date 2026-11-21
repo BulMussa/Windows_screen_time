@@ -85,7 +85,6 @@ sync.set_mode("both")
 # --- the real listener and a fake phone pushing to it ---
 EMPTY_LOG = {"total_seconds": 0.0, "active_seconds": 0.0, "on_timeline": [], "active_timeline": [],
              "focus": {}, "cursor": {}, "active": {}}
-peer.set_enabled(True)
 listener = peer.PeerListener(lambda: (date.today(), EMPTY_LOG), host="127.0.0.1", port=0, discovery_port=0)
 listener.start()
 check(listener.ready.wait(10) and listener.address, "listener up on 127.0.0.1")

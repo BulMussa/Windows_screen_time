@@ -25,7 +25,7 @@ to DISCOVERY_PORT asking "who is <this PC's install id>?" from its own device id
 runs, a responder on that port (same address as the listener) answers with this PC's address and
 port, but only the paired phone, and only when it asks for this PC.
 
-The listener is off unless "Allow phone sync" is ticked. It binds only to this PC's address on a
+The listener runs while Sync with is Phone directly or Both (sync.uses_direct). It binds only to this PC's address on a
 private network (192.168.x.x, 10.x.x.x, 172.16-31.x.x, link-local), follows that address when it
 changes, and answers only clients from private addresses. It also limits request size, requests per
 address and failed proofs per address.
@@ -87,9 +87,9 @@ def config_path():
 
 
 def load_config():
-    """peer.json: whether phone sync is allowed, the port, the paired phone (no secrets: those are
-    in Credential Manager) and when the open pairing started."""
-    config = {"enabled": False, "port": DEFAULT_PORT,
+    """peer.json: the port, the paired phone (no secrets: those are in Credential Manager) and when
+    the open pairing started."""
+    config = {"port": DEFAULT_PORT,
               "paired": None,  # {"device_id", "name", "since"} of the paired phone
               "pairing": None}  # {"started": epoch seconds, "phone": {...} once it has its key}
     try:
@@ -117,13 +117,16 @@ def write_json(path, data, indent=None):
 _config_lock = threading.Lock()  # pairing changes come from the window and from listener threads
 
 
-def set_enabled(enabled):
-    """Save "Allow phone sync"."""
+def take_legacy_enabled():
+    """True if "Allow phone sync" was ticked, from before the sync mode decided whether the listener
+    runs. Forgets it, so this answers once."""
     with _config_lock:
         config = load_config()
-        config["enabled"] = bool(enabled)
+        if "enabled" not in config:
+            return False
+        enabled = bool(config.pop("enabled"))
         save_config(config)
-        return config
+        return enabled
 
 
 def certificate():
@@ -908,7 +911,8 @@ class PeerListener:
 def main():
     config = load_config()
     cert, _ = certificate()
-    print(f"Allow phone sync: {'on' if config['enabled'] else 'off'}")
+    mode = sync.get_mode()
+    print(f"Phone sync:       {'on' if sync.uses_direct(mode) else 'off'} (Sync with: {mode})")
     print(f"Address:          {lan_address() or '(no network)'}:{config['port']}")
     print(f"Discovery:        UDP port {DISCOVERY_PORT} (answers only the paired phone)")
     print(f"Certificate:      {tlscert.fingerprint(cert)}")

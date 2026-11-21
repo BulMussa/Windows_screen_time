@@ -6,13 +6,13 @@ Words used below:
 
 - **Mode** is **Sync with**. On the phone it is in Settings: **Server**, **Laptop directly** or **Both**. On the PC it is in the Connect tab: **Server**, **Phone directly** or **Both**.
 - **Status** is the phone's sync status line, under **Sync now**.
-- **The PC's sync line** is the line next to **Allow phone sync** in the PC's Connect tab, and the amber firewall note under it.
+- **The PC's sync line** is the line under **Sync with** in the PC's Connect tab, and the amber firewall note under it.
 
 Before the manual items:
 
-1. Start `dist\ScreenTime.exe`, connect it to your server, set **Sync with: Both**, and tick **Allow phone sync**.
+1. Start `dist\ScreenTime.exe`, connect it to your server, and set **Sync with: Both**.
 2. Install the debug APK on the phone with `adb install -r app/build/outputs/apk/debug/app-debug.apk` (`-r` keeps the data; never uninstall the app, that deletes its database).
-3. Pair the two (PC: **Pair a phone…**; phone: Settings, Laptop, **Pair with laptop**).
+3. Pair the two (PC: **Pair phone**; phone: Settings, Laptop, **Pair with laptop**).
 
 ## Automated
 
@@ -39,7 +39,7 @@ Run these first; every manual item assumes they pass.
   - **Server:** `Synced at HH:MM`.
   - **Laptop directly:** `Synced at HH:MM · laptop found via last known address (192.168.x.x)` (or `via broadcast`).
   - **Both:** the same as **Laptop directly**.
-  - **Timelines:** the phone's Laptop row and the PC's Phone row show the same periods in every mode. The PC's line says `Phone last synced at HH:MM.` after each direct sync.
+  - **Timelines:** the phone's Laptop row and the PC's Phone row show the same periods in every mode. The PC's line says `Last synced at HH:MM.` after each direct sync.
 - **Automated?** Partly: `BothModeTest` and `test_both.py` cover the logic with fakes. The real network needs a person.
 
 ### 2. Phone hotspot
@@ -59,14 +59,14 @@ Run these first; every manual item assumes they pass.
   1. **Sync now** in **Laptop directly**.
   2. Then enter the PC's address under Settings, Laptop, **Laptop's address, if it isn't found**, and **Sync now** again.
 - **Expected.**
-  - **Sync now:** `Laptop not found. Is it on, with Screen Time running and Allow phone sync ticked, on the same Wi-Fi? Will try again.`
+  - **Sync now:** `Laptop not found. Is it on, with Screen Time running and syncing with the phone, on the same Wi-Fi? Will try again.`
   - **With the address entered:** still not found if the network blocks all traffic between devices. That is a known limit, not a bug. Nothing crashes. In **Both**, the server part still syncs: `Laptop: Laptop not found. … Server: synced at HH:MM.`
 - **Automated?** No, it needs a person.
 
 ### 4. Wrong secret
 
 - **Steps.**
-  1. On the PC choose **Pair a phone…** and note the code.
+  1. On the PC choose **Pair phone** and note the code.
   2. On the phone choose **Enter code** and type the IP, port and fingerprint right, but change one character of the secret.
 - **Expected.**
   - **On the phone:** the status says `The laptop didn't accept the pairing code: it's wrong, expired or already used. Pair again with a new code.`
@@ -102,19 +102,19 @@ Run these first; every manual item assumes they pass.
 
 - **Steps.**
   1. Delete Screen Time's rules: Windows Security, Firewall & network protection, **Allow an app through firewall**, remove **ScreenTime**. Or in an admin terminal: `Get-NetFirewallApplicationFilter -Program "<path to ScreenTime.exe>" | Get-NetFirewallRule | Remove-NetFirewallRule`.
-  2. Start the app and tick **Allow phone sync**. When Windows asks, press **Cancel**.
+  2. Start the app and set **Sync with** to Phone directly or Both. When Windows asks, press **Cancel**.
   3. **Sync now** on the phone.
 - **Expected.**
   - **On the PC:** declining makes Windows add block rules, so after a few seconds the sync line shows the amber note that a rule blocks Screen Time, with what to change.
   - **On the phone:** `Laptop not found…`.
-  - **After allowing it:** allow Screen Time on Private networks (the same **Allow an app** page). The note goes away the next time the listener starts (untick and tick **Allow phone sync**), and the phone syncs.
+  - **After allowing it:** allow Screen Time on Private networks (the same **Allow an app** page). The note goes away the next time the listener starts (choose Server, then Both again), and the phone syncs.
 - **Automated?** Partly: `test_firewall.py` covers the verdicts on made-up rules, plus one read-only query of the real firewall. The prompt needs a person.
 
 ### 8. Windows network profile: Public vs Private
 
 - **Steps.**
   1. Settings, Network & internet, Wi-Fi, your network: set **Network profile type** to **Public**, with Screen Time allowed on Private only.
-  2. Untick and tick **Allow phone sync**, then **Sync now** on the phone.
+  2. Choose Server, then Both again in **Sync with**, then **Sync now** on the phone.
   3. Then set the profile to **Private** and repeat.
 - **Expected.**
   - **Public:** the amber note says no rule allows Screen Time on this kind of network (Public), and the phone shows `Laptop not found…`.
@@ -127,7 +127,7 @@ Run these first; every manual item assumes they pass.
 
 - **Steps.** Phone and PC in **Both**.
   - **(a) Server down, laptop up:** stop the server, or disconnect the PC from Tailscale and the phone from it, keeping both on home Wi-Fi. Make a new phone period (use the phone for a minute), then **Sync now**.
-  - **(b) Laptop down, server up:** quit the PC app, or untick **Allow phone sync**, then **Sync now**.
+  - **(b) Laptop down, server up:** quit the PC app, then **Sync now**.
   - Then bring the missing side back and **Sync now** again.
 - **Expected.**
   - **(a):** `Laptop: synced at HH:MM. Server: Offline, will try again. …`. The new period shows on the PC at once.
