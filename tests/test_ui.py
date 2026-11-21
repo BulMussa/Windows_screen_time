@@ -139,6 +139,7 @@ pump(0.2)
 app.sync_from_report()
 check(app.tabs.index(app.tabs.select()) == 0, "direct mode: Report's Sync syncs instead of opening the Connect tab")
 check(pump(until=lambda: app.sync_status.get() == sync.DIRECT_MODE_STATUS), "... and says server sync is off")
+check(app.sync_buttons[0].button.cget("text") == "Phone syncs", "direct mode: the Sync button says the phone syncs, not failed")
 app.sync_mode.set("server")
 app.change_sync_mode()
 check(pump(until=lambda: sync.get_mode() == "server" and app.sync_status.get() == "Not connected"),

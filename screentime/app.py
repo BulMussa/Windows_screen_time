@@ -268,8 +268,10 @@ def cloud_png(size, color):
 
 class SyncButton:
     """The Sync button, the same in every tab: a cloud and "Sync" when idle, then "Syncing…" and
-    "✓ Synced" or "Sync failed". Its size fits the longest of these, so the text changes inside it."""
-    TEXTS = {"idle": " Sync", "syncing": "Syncing…", "done": "✓ Synced", "failed": "Sync failed"}
+    "✓ Synced" or "Sync failed", or "Phone syncs" in "Phone directly" mode, where the phone starts every
+    sync and this PC has nothing to send. Its size fits the longest of these, so the text changes inside it."""
+    TEXTS = {"idle": " Sync", "syncing": "Syncing…", "done": "✓ Synced", "failed": "Sync failed",
+             "direct": "Phone syncs"}
 
     def __init__(self, parent, app, command):
         font = app.sync_font
@@ -1182,7 +1184,11 @@ class App:
         self.sync_status.set(text)
         if self.syncing:  # the Sync buttons are waiting for this
             self.syncing = False
-            self.show_sync_buttons("done" if text.startswith("Synced") else "failed")
+            if text == sync.DIRECT_MODE_STATUS:  # nothing to sync from here: not a failure
+                result = "direct"
+            else:
+                result = "done" if text.startswith("Synced") else "failed"
+            self.show_sync_buttons(result)
             self.sync_reset = self.root.after(3000, lambda: self.show_sync_buttons("idle"))
         self.ticks = 0  # redraw the timeline soon, in case the sync brought phone or sleep data
 
