@@ -245,12 +245,45 @@ def load_remote():
         try:
             with open(path) as f:
                 data = json.load(f)
-        except (OSError, ValueError):
+        except OSError:
+            return empty_remote()
+        except ValueError:
+            data = None
+        if not remote_well_formed(data):
+            set_aside_damaged(path)
             return empty_remote()
         data.setdefault("intervals", {})
         data.setdefault("deleted", {})
         _remote_cache.update(stamp=stamp, data=data)
     return _remote_cache["data"]
+
+
+def remote_well_formed(data):
+    """Whether a loaded remote store has the shape load_remote describes (entries of 5 or more fields)."""
+    if not isinstance(data, dict):
+        return False
+    for store in ("intervals", "deleted"):
+        entries = data.get(store, {})
+        if not isinstance(entries, dict) or not all(isinstance(e, list) and len(e) >= 5 for e in entries.values()):
+            return False
+    return True
+
+
+def set_aside_damaged(path):
+    """A remote store that can't be read is renamed to "<name>.damaged-<time>" (kept, never overwritten) and
+    every transport pulls from the start again, so the server sends its rows again. Rows the phone pushed
+    directly come back when it is paired again (it then sends everything). Callers that hold the sync state
+    load the remote store first, so they see the reset cursors."""
+    aside = f"{path}.damaged-{datetime.now():%Y%m%d-%H%M%S}"
+    try:
+        os.replace(path, aside)
+    except OSError:
+        return
+    _remote_cache.update(stamp=None, data=None)
+    state = load_state()
+    for progress in state["transports"].values():
+        progress["cursor"] = "0"
+    save_state(state)
 
 
 def save_remote(remote):
@@ -592,10 +625,10 @@ def pull_once(name="server"):
     Returns how many stored intervals changed; raises SyncError.
     """
     with _lock:
+        remote = copy.deepcopy(load_remote())  # first: a damaged store resets the cursors in the state
         state = load_state()
         transport = transport_for(name, state)
         progress = state["transports"][name]
-        remote = copy.deepcopy(load_remote())
         changed, restarted = 0, False
         while True:
             try:
@@ -702,8 +735,8 @@ def import_backup(path, today):
     backup = read_backup(path)
     own = backup.get("own") or {}
     with _lock:
+        before = load_remote()  # first: a damaged store resets the cursors in the state
         state = load_state()
-        before = load_remote()
         remote = copy.deepcopy(before)
         rows = (backup.get("remote") or {}).get("intervals", []) + own.get("intervals", [])
         try:

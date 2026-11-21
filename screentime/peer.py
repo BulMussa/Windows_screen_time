@@ -412,12 +412,22 @@ def usage_path():
 
 
 def load_usage():
+    """The phone's app times it pushed. A file that can't be read is kept aside as "<name>.damaged-<time>"
+    rather than overwritten by the next push (the phone sends everything again when paired again)."""
     try:
         with open(usage_path()) as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except OSError:
         return {}
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        return data
+    try:
+        os.replace(usage_path(), f"{usage_path()}.damaged-{datetime.now():%Y%m%d-%H%M%S}")
+    except OSError:
+        pass
+    return {}
 
 
 _usage_lock = threading.Lock()
