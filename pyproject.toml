@@ -9,7 +9,7 @@ description = "Multi-monitor screen time tracker for Windows, with a taskbar clo
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["cryptography>=42", "segno>=1.6"]  # phone pairing: TLS certificate, QR code
 classifiers = ["Operating System :: Microsoft :: Windows"]
 
 [project.optional-dependencies]

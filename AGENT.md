@@ -7,6 +7,7 @@
 - Force-stop (`Stop-Process`) only if `--quit` returns 2, or for a build that predates `--quit`. That loses up to a minute of unsaved tracking (`SAVE_EVERY`) and can leave a dead tray icon.
 - When the work is done, rebuild with `packaging\build.bat` and start `dist\ScreenTime.exe --minimized` again, so tracking keeps running without popping the window up over the user's work.
 - Screenshot only the app's own windows or the taskbar corner, and only when the app's window is in front. Never keep screenshots that captured the user's other windows.
+- Don't create commits and don't push. Leave the changes in the working tree for the user to review.
 
 ## Test every new feature with everything it needs
 
